@@ -14,6 +14,7 @@ SRC_URI = " \
     file://0006-slaunch-skinit-end-the-PSP-TMR-at-the-top-of-system-memory.patch \
     file://0007-slaunch-skinit-size-the-PSP-TMR-from-the-e820-table-on-legacy-Linux.patch \
     file://0008-slaunch-export-slaunch_psp-so-grub.cfg-can-pick-the-SKL.patch \
+    file://0009-loader-i386-linux-clear-the-real-mode-chunk-before-filling.patch \
 "
 
 BRANCH_grub = "tb-dev"
