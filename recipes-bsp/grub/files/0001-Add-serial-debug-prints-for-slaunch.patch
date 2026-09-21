@@ -12,16 +12,21 @@ This is workaround for CPU exceptions when enabling debug prints via
 set debug=slaunch
 ```
 
+The helpers are compiled out of the host utilities (GRUB_UTIL) and
+grub-emu. A userspace process has no I/O port access, so the first
+in/out on 0x3f8 would kill it, which is how grub-bios-setup died in
+do_image_wic.
+
 Upstream-Status: Inappropriate [debug]
 Signed-off-by: Michał Iwanicki <michal.iwanicki@3mdeb.com>
 ---
- grub-core/kern/err.c  | 14 +++++++++++++
- grub-core/kern/misc.c | 47 +++++++++++++++++++++++++++++++++++++++++--
+ grub-core/kern/err.c  | 14 +++++++++++
+ grub-core/kern/misc.c | 57 ++++++++++++++++++++++++++++++++++++++++--
  include/grub/misc.h   |  2 ++
- 3 files changed, 61 insertions(+), 2 deletions(-)
+ 3 files changed, 71 insertions(+), 2 deletions(-)
 
 diff --git a/grub-core/kern/err.c b/grub-core/kern/err.c
-index 53c734de70e5..b61ef362b883 100644
+index 53c734d..b61ef36 100644
 --- a/grub-core/kern/err.c
 +++ b/grub-core/kern/err.c
 @@ -44,6 +44,20 @@ grub_error (grub_err_t n, const char *fmt, ...)
@@ -46,22 +51,31 @@ index 53c734de70e5..b61ef362b883 100644
  }
  
 diff --git a/grub-core/kern/misc.c b/grub-core/kern/misc.c
-index 62168d7ded34..58cf65f907db 100644
+index 62168d7..392b997 100644
 --- a/grub-core/kern/misc.c
 +++ b/grub-core/kern/misc.c
-@@ -27,6 +27,8 @@
+@@ -27,6 +27,10 @@
  #include <grub/types.h>
  #include <grub/charset.h>
  #include <grub/backtrace.h>
++#if !defined (GRUB_UTIL) && !defined (GRUB_MACHINE_EMU)
 +#include <grub/i386/io.h>
 +#include <grub/ns8250.h>
++#endif
  
  union printf_arg
  {
-@@ -244,6 +246,40 @@ grub_debug_enabled (const char * condition)
+@@ -244,6 +248,48 @@ grub_debug_enabled (const char * condition)
    return ret;
  }
  
++#if defined (GRUB_UTIL) || defined (GRUB_MACHINE_EMU)
++/* Host tools have no I/O port access, an in/out there is a fault.  */
++void
++grub_serial_print_nofree(const char *str __attribute__ ((unused)))
++{
++}
++#else
 +static void
 +serial_print_char(char c, unsigned short int port)
 +{
@@ -88,6 +102,7 @@ index 62168d7ded34..58cf65f907db 100644
 +{
 +    serial_print(str, 0x3f8);
 +}
++#endif
 +
 +void
 +grub_serial_print(char *str)
@@ -99,7 +114,7 @@ index 62168d7ded34..58cf65f907db 100644
  void
  grub_real_dprintf (const char *file, const int line, const char *condition,
  		   const char *fmt, ...)
-@@ -258,6 +294,13 @@ grub_real_dprintf (const char *file, const int line, const char *condition,
+@@ -258,6 +304,13 @@ grub_real_dprintf (const char *file, const int line, const char *condition,
        va_end (args);
        grub_refresh ();
      }
@@ -113,7 +128,7 @@ index 62168d7ded34..58cf65f907db 100644
  }
  
  #define PREALLOC_SIZE 255
-@@ -634,14 +677,14 @@ grub_str_sep (const char *s, char *p, char delim, char *r)
+@@ -634,14 +687,14 @@ grub_str_sep (const char *s, char *p, char delim, char *r)
    if (t != NULL && *t != '\0')
    {
      char* tmp = t;
@@ -131,7 +146,7 @@ index 62168d7ded34..58cf65f907db 100644
      {
        t++;
 diff --git a/include/grub/misc.h b/include/grub/misc.h
-index 23bdaee12277..186545f1f694 100644
+index 23bdaee..186545f 100644
 --- a/include/grub/misc.h
 +++ b/include/grub/misc.h
 @@ -372,6 +372,8 @@ grub_puts (const char *s)
