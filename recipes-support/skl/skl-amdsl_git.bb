@@ -7,8 +7,3 @@ require skl.inc
 EXTRA_OEMAKE += "AMDSL=y"
 
 SKL_DEPLOY_NAME = "skl-amdsl.bin"
-
-# Boot partition only, the rootfs keeps the classic skl package.
-do_install() {
-    :
-}

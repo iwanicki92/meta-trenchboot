@@ -17,7 +17,7 @@ IMAGE_INSTALL = " \
 
 IMAGE_FSTYPES += "wic wic.gz wic.bmap"
 
-# skl-amdsl.bin comes from DEPLOY_DIR_IMAGE, not from a rootfs package.
+# The boot partition takes skl-amdsl.bin from DEPLOY_DIR_IMAGE.
 # nooelint: oelint.vars.mispell.unknown
 do_image_wic[depends] += "skl-amdsl:do_deploy"
 

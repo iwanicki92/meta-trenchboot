@@ -1,6 +1,7 @@
 # Shared by skl (classic SKINIT launch) and skl-amdsl (the build that
-# drives the PSP DRTM service). One image ships both and grub.cfg picks
-# by the slaunch_psp variable GRUB sets.
+# drives the PSP DRTM service). One image ships both under ${bindir}/skl
+# and on the boot partition, where grub.cfg picks by the slaunch_psp
+# variable GRUB sets.
 
 HOMEPAGE = "https://github.com/TrenchBoot/secure-kernel-loader"
 
@@ -42,18 +43,16 @@ EXTRA_OEMAKE += "DEBUG=y"
 SECURITY_STACK_PROTECTOR = ""
 lcl_maybe_fortify = ""
 
+# Name of the binary in the rootfs, in DEPLOY_DIR_IMAGE and so on the boot
+# partition.
+SKL_DEPLOY_NAME ?= "skl.bin"
+
 do_install(){
     install -d ${D}${bindir}/skl
-
-    install -m 0600 ${S}/skl.bin ${D}${bindir}/skl/
-    install -m 0755 ${S}/extend_all.sh ${D}${bindir}/skl/
-    install -m 0755 ${S}/util.sh ${D}${bindir}/skl/
+    install -m 0600 ${S}/skl.bin ${D}${bindir}/skl/${SKL_DEPLOY_NAME}
 }
 
 inherit deploy
-
-# Name of the binary in DEPLOY_DIR_IMAGE, and so on the boot partition.
-SKL_DEPLOY_NAME ?= "skl.bin"
 
 do_deploy() {
     install -d ${DEPLOYDIR}
