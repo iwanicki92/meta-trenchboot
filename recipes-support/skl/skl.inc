@@ -28,6 +28,7 @@ SRC_URI = " \
     file://0014-amdsl-read-PCR-17-to-20-after-DRTM_CMD_EXTEND_OSSL_D.patch \
     file://0015-amdsl-dump-the-TIS-state-and-retry-locality-2-before.patch \
     file://0016-amdsl-print-the-SHA-256-of-the-DLME-range-before-the.patch \
+    file://0017-Log-the-TPM-s-banks-and-append-the-PSP-s-TCG-log.patch \
 "
 
 BRANCH = "skl-loader-amdsl-noblob"
