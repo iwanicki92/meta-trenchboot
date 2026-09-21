@@ -12,6 +12,7 @@ SRC_URI = " \
     file://0004-slaunch-psp-print-base_addr.patch \
     file://0005-slaunch-skinit-size-the-PSP-TMR-from-the-boot-path-memory-map.patch \
     file://0006-slaunch-skinit-end-the-PSP-TMR-at-the-top-of-system-memory.patch \
+    file://0007-slaunch-skinit-size-the-PSP-TMR-from-the-e820-table-on-legacy-Linux.patch \
 "
 
 BRANCH_grub = "tb-dev"

@@ -1,0 +1,89 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: iwanicki92 <iwanicki92@gmail.com>
+Date: Mon, 21 Sep 2026 20:58:09 +0200
+Subject: [PATCH] slaunch: skinit: size the PSP TMR from the e820 table on
+ legacy Linux boots
+
+boot_params_mmap_end() walked the EFI memory map the Linux boot params
+point at. A legacy BIOS boot has no EFI memory map, its boot params
+carry the e820 table the loader filled instead, so the walk found
+nothing, no other map was recorded on that path, and the launch was
+refused with "no memory map to size the TMR from".
+
+Fall back to the e820 table when the EFI map is empty, keeping the
+highest end address of the RAM, ACPI and NVS entries, the same types
+the Multiboot2 basic map walk counts.
+
+Upstream-Status: Pending
+Signed-off-by: iwanicki92 <iwanicki92@gmail.com>
+---
+ grub-core/loader/slaunch/skinit.c | 41 +++++++++++++++++++++++++++---
+ 1 file changed, 37 insertions(+), 4 deletions(-)
+
+diff --git a/grub-core/loader/slaunch/skinit.c b/grub-core/loader/slaunch/skinit.c
+index 635f64e..0dd5d84 100644
+--- a/grub-core/loader/slaunch/skinit.c
++++ b/grub-core/loader/slaunch/skinit.c
+@@ -212,13 +212,42 @@ mb2_mmap_end (grub_uint64_t mbi_base)
+   return end;
+ }
+ 
+-/* Highest end address in the EFI memory map that the Linux boot params point at. */
++/*
++ * Highest end address in the e820 table of the Linux boot params, the map a
++ * legacy BIOS boot carries. The loader fills it before the DL stub runs.
++ */
++static grub_uint64_t
++boot_params_e820_end (struct linux_kernel_params *boot_params)
++{
++  grub_uint64_t end = 0;
++  unsigned int i;
++
++  for (i = 0; i < boot_params->mmap_size && i < ARRAY_SIZE (boot_params->e820_map); i++)
++    {
++      struct grub_e820_mmap *e = &boot_params->e820_map[i];
++
++      /* The firmware marks MMIO as reserved, so only RAM types count. */
++      if (e->type != GRUB_E820_RAM && e->type != GRUB_E820_ACPI
++          && e->type != GRUB_E820_NVS)
++        continue;
++
++      if (e->addr + e->size > end)
++        end = e->addr + e->size;
++    }
++
++  return end;
++}
++
++/*
++ * Highest end address in the memory map the Linux boot params carry: the EFI
++ * memory map on an EFI boot, the e820 table on a legacy BIOS boot.
++ */
+ static grub_uint64_t
+ boot_params_mmap_end (struct grub_slaunch_params *slparams)
+ {
+   struct linux_kernel_params *boot_params = slparams->boot_params;
+   struct grub_efi_info *efi_info;
+-  grub_uint64_t efi_memmap, hi_val;
++  grub_uint64_t efi_memmap, hi_val, end;
+ 
+   if (boot_params == NULL)
+     return 0;
+@@ -247,8 +276,12 @@ boot_params_mmap_end (struct grub_slaunch_params *slparams)
+       efi_memmap = (grub_uint64_t)(grub_addr_t)slparams->efi_memmap_mem;
+     }
+ 
+-  return grub_skinit_efi_mmap_end ((grub_addr_t) efi_memmap, efi_info->efi_mmap_size,
+-                                   efi_info->efi_mem_desc_size);
++  end = grub_skinit_efi_mmap_end ((grub_addr_t) efi_memmap, efi_info->efi_mmap_size,
++                                  efi_info->efi_mem_desc_size);
++  if (end == 0)
++    end = boot_params_e820_end (boot_params);
++
++  return end;
+ }
+ 
+ grub_err_t
+-- 
+2.43.0
+
