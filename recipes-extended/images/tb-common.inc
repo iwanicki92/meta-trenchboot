@@ -17,6 +17,10 @@ IMAGE_INSTALL = " \
 
 IMAGE_FSTYPES += "wic wic.gz wic.bmap"
 
+# skl-amdsl.bin comes from DEPLOY_DIR_IMAGE, not from a rootfs package.
+# nooelint: oelint.vars.mispell.unknown
+do_image_wic[depends] += "skl-amdsl:do_deploy"
+
 IMAGE_ROOTFS_SIZE ?= "8192"
 IMAGE_ROOTFS_EXTRA_SPACE:append = "${@bb.utils.contains("DISTRO_FEATURES", "systemd", " + 4096", "", d)}"
 
