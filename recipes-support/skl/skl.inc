@@ -29,6 +29,8 @@ SRC_URI = " \
     file://0015-amdsl-dump-the-TIS-state-and-retry-locality-2-before.patch \
     file://0016-amdsl-print-the-SHA-256-of-the-DLME-range-before-the.patch \
     file://0017-Log-the-TPM-s-banks-and-append-the-PSP-s-TCG-log.patch \
+    file://0018-link.lds-put-the-small-.bss-before-the-page-aligned-.patch \
+    file://0019-Print-to-the-framebuffer-GRUB-describes-in-the-SLRT.patch \
 "
 
 BRANCH = "skl-loader-amdsl-noblob"

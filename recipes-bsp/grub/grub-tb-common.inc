@@ -16,6 +16,7 @@ SRC_URI = " \
     file://0009-loader-i386-linux-clear-the-real-mode-chunk-before-filling.patch \
     file://0010-slaunch-mark-the-EFI-boot-services-finished-in-dl_entry.patch \
     file://0011-slaunch-print-dl_entry-s-error-on-the-EFI-path.patch \
+    file://0012-slaunch-print-debug-output-on-the-GOP-framebuffer-af.patch \
 "
 
 BRANCH_grub = "tb-dev"
