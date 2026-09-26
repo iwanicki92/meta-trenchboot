@@ -15,6 +15,7 @@ SRC_URI = " \
     file://0007-slaunch-skinit-size-the-PSP-TMR-from-the-e820-table-on-legacy-Linux.patch \
     file://0008-slaunch-export-slaunch_psp-so-grub.cfg-can-pick-the-SKL.patch \
     file://0009-loader-i386-linux-clear-the-real-mode-chunk-before-filling.patch \
+    file://0010-slaunch-mark-the-EFI-boot-services-finished-in-dl_entry.patch \
 "
 
 BRANCH_grub = "tb-dev"
