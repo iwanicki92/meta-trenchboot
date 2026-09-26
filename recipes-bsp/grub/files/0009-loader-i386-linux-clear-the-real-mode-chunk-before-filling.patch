@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: iwanicki92 <iwanicki92@gmail.com>
+Date: Mon, 21 Sep 2026 22:48:07 +0200
+Subject: [PATCH] loader/i386/linux: clear the real-mode chunk before filling
+ the zero page
+
+The kernel takes the whole 4 KiB zero page and a dynamic launch
+measures all of it as "Measured boot parameters", while linux_params
+covers only the first 0x3fc bytes. The rest of the page was whatever
+the relocator chunk held, GRUB heap contents that vary with the
+command line's length, so two launches differing only in a kernel
+parameter got different PCR 18 boot params digests.
+
+Zero the chunk right after it is allocated, the way the SKINIT setup
+already zeros the MLE for stable measurements.
+
+Upstream-Status: Pending
+Signed-off-by: iwanicki92 <iwanicki92@gmail.com>
+---
+ grub-core/loader/i386/linux.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/grub-core/loader/i386/linux.c b/grub-core/loader/i386/linux.c
+index f5b13c2..38a65d4 100644
+--- a/grub-core/loader/i386/linux.c
++++ b/grub-core/loader/i386/linux.c
+@@ -595,6 +595,13 @@ grub_linux_boot (void)
+      return err;
+     real_mode_mem = get_virtual_current_address (ch);
+ 
++    /*
++     * The kernel takes the whole 4 KiB zero page and a dynamic launch
++     * measures it, while linux_params fills less than that: clear the
++     * chunk so the rest is not whatever memory held before.
++     */
++    grub_memset (real_mode_mem, 0, sz);
++
+     if (grub_slaunch_platform_type () != SLP_NONE)
+       {
+         slparams.boot_params = real_mode_mem;
+-- 
+2.43.0
+

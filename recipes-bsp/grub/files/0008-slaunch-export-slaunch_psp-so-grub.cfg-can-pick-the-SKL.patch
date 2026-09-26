@@ -1,0 +1,139 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: iwanicki92 <iwanicki92@gmail.com>
+Date: Mon, 21 Sep 2026 22:27:03 +0200
+Subject: [PATCH] slaunch: export slaunch_psp so grub.cfg can pick the SKL
+ build
+
+The SKL built with AMDSL=y drives the PSP DRTM mailbox and fails its
+launch on a machine without a PSP, while the classic build ignores the
+PSP. An image shipping both needs GRUB to say which one fits before
+slaunch_module loads it.
+
+Split the PCI walk out of grub_psp_discover() into find_psp_device()
+and add grub_psp_present(), which only reads vendor and device IDs and
+leaves the device untouched. The slaunch command calls it on AMD and
+sets slaunch_psp to 1 or 0, so a grub.cfg can branch on it:
+
+  if [ "$slaunch_psp" = "1" ]; then
+    slaunch_module /skl-amdsl.bin
+  else
+    slaunch_module /skl.bin
+  fi
+
+Upstream-Status: Pending
+Signed-off-by: iwanicki92 <iwanicki92@gmail.com>
+---
+ grub-core/loader/slaunch/psp.c     | 43 +++++++++++++++++++++---------
+ grub-core/loader/slaunch/slaunch.c |  4 +++
+ include/grub/i386/psp.h            |  1 +
+ 3 files changed, 35 insertions(+), 13 deletions(-)
+
+diff --git a/grub-core/loader/slaunch/psp.c b/grub-core/loader/slaunch/psp.c
+index 015b13f..fd342d0 100644
+--- a/grub-core/loader/slaunch/psp.c
++++ b/grub-core/loader/slaunch/psp.c
+@@ -184,37 +184,54 @@ lookup_drtm_device (grub_uint16_t vendor_id, grub_uint16_t dev_id)
+   return psp;
+ }
+ 
+-grub_err_t
+-grub_psp_discover (void)
++/* Walk the PCI buses for a PSP with the DRTM service, reading only its IDs. */
++static const struct pci_psp_device *
++find_psp_device (grub_pci_device_t *dev)
+ {
+-  grub_pci_device_t dev;
+   grub_pci_address_t addr;
+   grub_uint16_t vendor_id, dev_id;
+-  const struct pci_psp_device *psp = NULL;
+-  grub_uint64_t bar2_addr = 0;
+-  grub_err_t err;
++  const struct pci_psp_device *psp;
+ 
+-  for (dev.bus = 0; dev.bus < GRUB_PCI_NUM_BUS; dev.bus++)
++  for (dev->bus = 0; dev->bus < GRUB_PCI_NUM_BUS; dev->bus++)
+     {
+-      for (dev.device = 0; dev.device < GRUB_PCI_NUM_DEVICES; dev.device++)
++      for (dev->device = 0; dev->device < GRUB_PCI_NUM_DEVICES; dev->device++)
+         {
+-          for (dev.function = 0; dev.function < GRUB_PCI_NUM_FUNCTIONS; dev.function++)
++          for (dev->function = 0; dev->function < GRUB_PCI_NUM_FUNCTIONS; dev->function++)
+             {
+-              addr = grub_pci_make_address (dev, 0);
++              addr = grub_pci_make_address (*dev, 0);
+               vendor_id = grub_pci_read_word (addr);
+-              addr = grub_pci_make_address (dev, 2);
++              addr = grub_pci_make_address (*dev, 2);
+               dev_id = grub_pci_read_word (addr);
+               psp = lookup_drtm_device (vendor_id, dev_id);
+               if (psp)
+-                goto psp_found;
++                return psp;
+             }
+         }
+     }
+ 
++  return NULL;
++}
++
++int
++grub_psp_present (void)
++{
++  grub_pci_device_t dev;
++
++  return find_psp_device (&dev) != NULL;
++}
++
++grub_err_t
++grub_psp_discover (void)
++{
++  grub_pci_device_t dev;
++  const struct pci_psp_device *psp;
++  grub_uint64_t bar2_addr = 0;
++  grub_err_t err;
++
++  psp = find_psp_device (&dev);
+   if (!psp)
+     return grub_error (GRUB_ERR_BAD_DEVICE, N_("DRTM: failed to find PSP\n"));
+ 
+-psp_found:
+   init_drtm_device (dev);
+ 
+   bar2_addr = get_psp_bar_addr();
+diff --git a/grub-core/loader/slaunch/slaunch.c b/grub-core/loader/slaunch/slaunch.c
+index 39e6e0a..7b66e52 100644
+--- a/grub-core/loader/slaunch/slaunch.c
++++ b/grub-core/loader/slaunch/slaunch.c
+@@ -29,6 +29,7 @@
+ #include <grub/i386/mmio.h>
+ #include <grub/i386/txt.h>
+ #include <grub/i386/skinit.h>
++#include <grub/i386/psp.h>
+ 
+ GRUB_MOD_LICENSE ("GPLv3+");
+ 
+@@ -90,6 +91,9 @@ grub_cmd_slaunch (grub_command_t cmd __attribute__ ((unused)),
+ 	return err;
+ 
+       slp = SLP_AMD_SKINIT;
++
++      /* Let grub.cfg pick the SKL build matching the platform. */
++      grub_env_set ("slaunch_psp", grub_psp_present () ? "1" : "0");
+     }
+   else
+     return grub_error (GRUB_ERR_UNKNOWN_DEVICE, N_("CPU is unsupported"));
+diff --git a/include/grub/i386/psp.h b/include/grub/i386/psp.h
+index 4df3173..016902c 100644
+--- a/include/grub/i386/psp.h
++++ b/include/grub/i386/psp.h
+@@ -82,6 +82,7 @@
+ #define DRTM_CMD_READY			0
+ #define DRTM_RESPONSE_READY		1
+ 
++extern int grub_psp_present (void);
+ extern grub_err_t grub_psp_discover (void);
+ extern grub_uint16_t grub_psp_version (void);
+ extern void grub_drtm_kick_psp (void);
+-- 
+2.43.0
+

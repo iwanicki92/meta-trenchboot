@@ -6,12 +6,18 @@ PV = "2.12"
 SRC_URI = " \
     git://github.com/TrenchBoot/grub.git;name=grub;branch=${BRANCH_grub};protocol=https \
     git://github.com/coreutils/gnulib;name=gnulib;branch=${BRANCH_gnulib};protocol=https;destsuffix=git/gnulib \
-    file://0001-Add-serial-debug-prints-for-slaunch.patch \
     file://0002-psp.c-Add-get_capability-debug-print.patch \
     file://0003-psp.c-Set-MSI-PRO-B850-and-Turin-CCP-ASP-PSP-version.patch \
     file://0004-slaunch-psp-print-base_addr.patch \
     file://0005-slaunch-skinit-size-the-PSP-TMR-from-the-boot-path-memory-map.patch \
     file://0006-slaunch-skinit-end-the-PSP-TMR-at-the-top-of-system-memory.patch \
+    file://0007-slaunch-skinit-size-the-PSP-TMR-from-the-e820-table-on-legacy-Linux.patch \
+    file://0008-slaunch-export-slaunch_psp-so-grub.cfg-can-pick-the-SKL.patch \
+    file://0009-loader-i386-linux-clear-the-real-mode-chunk-before-filling.patch \
+    file://0010-slaunch-mark-the-EFI-boot-services-finished-in-dl_entry.patch \
+    file://0011-slaunch-print-dl_entry-s-error-on-the-EFI-path.patch \
+    file://0012-slaunch-print-debug-output-on-the-GOP-framebuffer-af.patch \
+    file://0013-slaunch-keep-a-debug-launch-log-in-RAM-across-a-rese.patch \
 "
 
 BRANCH_grub = "tb-dev"

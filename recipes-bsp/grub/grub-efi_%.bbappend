@@ -2,7 +2,10 @@ require grub-tb-common.inc
 
 FILESEXTRAPATHS:prepend := "${THISDIR}/${PN}:"
 
-SRC_URI += "file://cfg"
+SRC_URI += " \
+    file://cfg \
+    file://0001-slaunch-read-the-Linux-MLE-header-at-the-offset-kern.patch \
+"
 
 # nooelint: oelint.vars.mispell.unknown
 GRUB_BUILDIN = " \

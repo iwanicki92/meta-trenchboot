@@ -1,0 +1,111 @@
+From 92dbe9fa4d6e585ef744328d14019367f786a5c0 Mon Sep 17 00:00:00 2001
+From: iwanicki92 <iwanicki92@gmail.com>
+Date: Tue, 22 Sep 2026 01:20:35 +0200
+Subject: [PATCH] x86/tpm: skip the digests the early log has no bank for
+
+The multiboot2 entry measures the MBI from tpm_early.bin, which has no
+hash code and lets the TPM hash through an event sequence. On
+TPM2_EventSequenceComplete the TPM answers with one digest per hash it
+implements, in its own order, whether or not the bank is allocated or
+the event log declares it. The copy loop stopped at the first digest
+the log does not list, since it did not know that digest's size, and
+the entry kept the OneDigest placeholder in every bank after it.
+
+That is what happens with the SHA-1 bank left out of the log, as it is
+when the TPM has no SHA-1 bank and the loader declares only the
+allocated ones: the TPM lists SHA-1 first, so the MBI event on PCR 18
+logged the placeholder in SHA-256 and the log no longer replayed to the
+PCR.
+
+Skip a digest of a known size instead and stop only at an algorithm
+whose size is unknown. The early object grows by about 180 bytes.
+
+Upstream-Status: Pending
+Signed-off-by: iwanicki92 <iwanicki92@gmail.com>
+---
+ xen/arch/x86/tpm.c | 40 +++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 39 insertions(+), 1 deletion(-)
+
+diff --git a/xen/arch/x86/tpm.c b/xen/arch/x86/tpm.c
+index 06fbbcfb45..73ab523ba4 100644
+--- a/xen/arch/x86/tpm.c
++++ b/xen/arch/x86/tpm.c
+@@ -479,7 +479,13 @@ static void *create_log_event12(struct txt_ev_log_container_12 *evt_log,
+ 
+ #define TPM_ALG_SHA1        0x0004
+ #define TPM_ALG_SHA256      0x000b
++#define TPM_ALG_SHA384      0x000c
++#define TPM_ALG_SHA512      0x000d
+ #define TPM_ALG_NULL        0x0010
++#define TPM_ALG_SM3_256     0x0012
++#define TPM_ALG_SHA3_256    0x0027
++#define TPM_ALG_SHA3_384    0x0028
++#define TPM_ALG_SHA3_512    0x0029
+ 
+ #define TPM2_PCR_Extend                 0x00000182
+ #define TPM2_PCR_HashSequenceStart      0x00000186
+@@ -625,6 +631,27 @@ struct tpm2_spec_id_event {
+ 
+ #ifdef __EARLY_TPM__
+ 
++/* Digest size of a TPM 2.0 hash algorithm, 0 for an unknown one. */
++static unsigned tpm2_digest_size(uint16_t alg)
++{
++    switch ( alg ) {
++    case TPM_ALG_SHA1:
++        return 20;
++    case TPM_ALG_SHA256:
++    case TPM_ALG_SM3_256:
++    case TPM_ALG_SHA3_256:
++        return 32;
++    case TPM_ALG_SHA384:
++    case TPM_ALG_SHA3_384:
++        return 48;
++    case TPM_ALG_SHA512:
++    case TPM_ALG_SHA3_512:
++        return 64;
++    default:
++        return 0;
++    }
++}
++
+ union tpm2_cmd_rsp {
+     uint8_t b[sizeof(struct tpm2_sequence_update_cmd) + MAX_HASH_BLOCK];
+     struct tpm_cmd_hdr c;
+@@ -725,10 +752,16 @@ static uint32_t tpm2_hash_extend(unsigned loc, const uint8_t *buf,
+             goto error;
+     }
+ 
++    /*
++     * The TPM answers with a digest for every hash it implements, in its
++     * own order, whether or not the bank is allocated or the log lists
++     * it. Skip the ones the log does not list.
++     */
+     p = cmd_rsp.finish_r.hashes;
+     for ( i = 0; i < swap32(cmd_rsp.finish_r.hashCount); ++i ) {
+         unsigned j;
+         uint16_t hash_type;
++        unsigned hash_size;
+ 
+         hash_type = swap16(*(uint16_t *)p);
+         p += sizeof(uint16_t);
+@@ -742,10 +775,15 @@ static uint32_t tpm2_hash_extend(unsigned loc, const uint8_t *buf,
+             }
+         }
+ 
+-        if ( j == log_hashes->count ) {
++        if ( j < log_hashes->count )
++            continue;
++
++        hash_size = tpm2_digest_size(hash_type);
++        if ( hash_size == 0 ) {
+             /* Can't continue parsing without knowing hash size. */
+             break;
+         }
++        p += hash_size;
+     }
+ 
+     rc = 0;
+-- 
+2.43.0
+
