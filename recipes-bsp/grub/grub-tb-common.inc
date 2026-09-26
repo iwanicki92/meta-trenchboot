@@ -17,6 +17,7 @@ SRC_URI = " \
     file://0010-slaunch-mark-the-EFI-boot-services-finished-in-dl_entry.patch \
     file://0011-slaunch-print-dl_entry-s-error-on-the-EFI-path.patch \
     file://0012-slaunch-print-debug-output-on-the-GOP-framebuffer-af.patch \
+    file://0013-slaunch-keep-a-debug-launch-log-in-RAM-across-a-rese.patch \
 "
 
 BRANCH_grub = "tb-dev"

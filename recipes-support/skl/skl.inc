@@ -31,6 +31,7 @@ SRC_URI = " \
     file://0017-Log-the-TPM-s-banks-and-append-the-PSP-s-TCG-log.patch \
     file://0018-link.lds-put-the-small-.bss-before-the-page-aligned-.patch \
     file://0019-Print-to-the-framebuffer-GRUB-describes-in-the-SLRT.patch \
+    file://0020-Append-the-output-to-a-RAM-log-GRUB-describes-in-the.patch \
 "
 
 BRANCH = "skl-loader-amdsl-noblob"

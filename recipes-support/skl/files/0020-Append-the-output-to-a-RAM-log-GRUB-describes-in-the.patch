@@ -1,0 +1,233 @@
+From 4f0d4a216e8d7bfb61b364bfed822b3528ea8fee Mon Sep 17 00:00:00 2001
+From: iwanicki92 <iwanicki92@gmail.com>
+Date: Sat, 26 Sep 2026 19:54:48 +0200
+Subject: [PATCH] Append the output to a RAM log GRUB describes in the SLRT
+
+With DEBUG, print() also appends to a ring buffer in RAM when GRUB adds
+its debug-only SLRT entry for one. A reset usually leaves DRAM alone, so
+GRUB can show the launch's output on the next boot, on a platform with
+neither a serial port nor a usable framebuffer. Hex dumps go there too.
+Each cache line is flushed once written, a reset loses dirty lines.
+
+The address comes from unmeasured bootloader data, so a region that
+overlaps the SLB, reaches above 4 GiB or lacks the header GRUB writes is
+refused. print_p() now calls print_u64(), which prints the same digits,
+to keep the classic build's bootloader_data below 0xf000.
+
+Upstream-Status: Inappropriate [debug]
+Signed-off-by: iwanicki92 <iwanicki92@gmail.com>
+---
+ include/printk.h |  2 ++
+ include/slrt.h   | 23 +++++++++++++
+ main.c           |  2 ++
+ printk.c         | 86 ++++++++++++++++++++++++++++++++++++------------
+ 4 files changed, 92 insertions(+), 21 deletions(-)
+
+diff --git a/include/printk.h b/include/printk.h
+index cc24b11..71c5d13 100644
+--- a/include/printk.h
++++ b/include/printk.h
+@@ -11,6 +11,7 @@ void print_u64(u64 p);
+ void hexdump(const void *unused, size_t unused2);
+ void fb_init(void);
+ void fb_putc(char c);
++void log_init(void);
+ 
+ #else
+ 
+@@ -19,6 +20,7 @@ static inline void print_p(const void *unused) { }
+ static inline void print_u64(u64 p) { }
+ static inline void hexdump(const void *unused, size_t unused2) { }
+ static inline void fb_init(void) { }
++static inline void log_init(void) { }
+ 
+ #endif
+ 
+diff --git a/include/slrt.h b/include/slrt.h
+index 183f186..af9be87 100644
+--- a/include/slrt.h
++++ b/include/slrt.h
+@@ -26,6 +26,7 @@
+ #define SLR_ENTRY_UEFI_INFO     0x0007
+ #define SLR_ENTRY_UEFI_CONFIG   0x0008
+ #define SLR_ENTRY_DEBUG_FB      0x8000  /* Debug only, not in the specification */
++#define SLR_ENTRY_DEBUG_LOG     0x8001  /* Debug only, not in the specification */
+ #define SLR_ENTRY_END           0xffff
+ 
+ /*
+@@ -114,6 +115,28 @@ struct slr_entry_debug_fb {
+     u32 reserved;
+ } __packed;
+ 
++/*
++ * Debug only: a ring buffer in RAM, a struct debug_log followed by its data,
++ * that keeps the launch output across a reset for GRUB to show on the next
++ * boot.
++ */
++struct slr_entry_debug_log {
++    struct slr_entry_hdr hdr;
++    u64 base;
++    u64 size;       /* Including the struct debug_log */
++} __packed;
++
++#define DEBUG_LOG_MAGIC 0x474f4c4742444c53ULL   /* "SLDBGLOG" */
++
++struct debug_log {
++    u64 magic;
++    u32 size;       /* Of data[] */
++    u32 head;       /* Next byte written */
++    u32 wrapped;    /* data[] filled at least once */
++    u32 reserved;
++    char data[];
++} __packed;
++
+ /* Secure Kernel Loader */
+ extern struct slr_table bootloader_data;
+ 
+diff --git a/main.c b/main.c
+index 8d6772f..bfba02b 100644
+--- a/main.c
++++ b/main.c
+@@ -636,6 +636,7 @@ asm_return_t skl_main(void)
+      * will include the Secure Launch stub.
+      */
+ 
++    log_init();
+     fb_init();
+ 
+     /* Disable memory protection and setup IOMMU */
+@@ -703,6 +704,7 @@ asm_return_t skl_main(void)
+ 
+ #else /* AMDSL */
+ 
++    log_init();
+     fb_init();
+ 
+     return amdsl_launch();
+diff --git a/printk.c b/printk.c
+index 02e6c3e..df6f6c4 100644
+--- a/printk.c
++++ b/printk.c
+@@ -16,6 +16,8 @@
+ 
+ #include <boot.h>
+ #include <types.h>
++#include <defs.h>
++#include <slrt.h>
+ 
+ #include <printk.h>
+ 
+@@ -24,6 +26,33 @@
+ /* Hex dumps would scroll everything else off the screen. */
+ static int serial_only;
+ 
++/* The RAM log GRUB describes in the SLRT, NULL until log_init() takes it. */
++static struct debug_log *log;
++
++static inline void clflush(const void *p)
++{
++    asm volatile ("clflush %0" : : "m" (*(const volatile char *)p));
++}
++
++/* A reset loses dirty cache lines, so each one is flushed when done. */
++static void log_putc(char c)
++{
++    char *p = &log->data[log->head];
++
++    *p = c;
++    if ( ++log->head == log->size )
++    {
++        log->head = 0;
++        log->wrapped = 1;
++    }
++
++    if ( c == '\n' || ((_u(p) + 1) & 63) == 0 )
++    {
++        clflush(p);
++        clflush(log);
++    }
++}
++
+ static void print_char(char c)
+ {
+     while ( !(inb(0x3f8 + 5) & 0x20) )
+@@ -31,10 +60,44 @@ static void print_char(char c)
+ 
+     outb(c, 0x3f8);
+ 
++    if ( log != NULL )
++        log_putc(c);
++
+     if ( !serial_only )
+         fb_putc(c);
+ }
+ 
++/*
++ * Checks the entry and the header GRUB wrote, the address comes from
++ * unmeasured bootloader data. Neither build reaches above 4 GiB.
++ */
++void log_init(void)
++{
++    struct slr_entry_debug_log *e;
++    struct debug_log *l;
++    u64 slb = _u(_start);
++
++    e = next_entry_with_tag(NULL, SLR_ENTRY_DEBUG_LOG);
++    if ( e == NULL || e->hdr.size != sizeof(*e) || end_of_slrt() < _p(&e[1]) )
++        return;
++
++    l = _p(e->base);
++    if ( e->base == 0 || e->size <= sizeof(*l) || e->size > 0x100000000ULL
++         || e->base > 0x100000000ULL - e->size
++         || (e->base < slb + SLB_SIZE && e->base + e->size > slb)
++         || l->magic != DEBUG_LOG_MAGIC || l->size != e->size - sizeof(*l)
++         || l->head >= l->size )
++    {
++        print("Log: bad entry, not used\n");
++        return;
++    }
++
++    log = l;
++    print("Log: SKL appends to the RAM log at ");
++    print_p(log);
++    print("\n");
++}
++
+ void print(const char * txt)
+ {
+     while ( *txt != '\0' )
+@@ -45,29 +108,10 @@ void print(const char * txt)
+     }
+ }
+ 
++/* Same digits as print_u64(), which prints sizeof(void *) bytes too. */
+ void print_p(const void * _p)
+ {
+-    char tmp[sizeof(void*)*2 + 5] = "0x";
+-    int i;
+-    size_t p = (size_t)_p;
+-
+-    for ( i=0; i<sizeof(void*); i++ )
+-    {
+-        if ( (p & 0xf) >= 10 )
+-            tmp[sizeof(void*)*2 + 1 - 2*i] = (p & 0xf) + 'a' - 10;
+-        else
+-            tmp[sizeof(void*)*2 + 1 - 2*i] = (p & 0xf) + '0';
+-        p >>= 4;
+-        if ( (p & 0xf) >= 10 )
+-            tmp[sizeof(void*)*2 - 2*i] = (p & 0xf) + 'a' - 10;
+-        else
+-            tmp[sizeof(void*)*2 - 2*i] = (p & 0xf) + '0';
+-        p >>= 4;
+-    }
+-    tmp[sizeof(void*)*2 + 2] = ':';
+-    tmp[sizeof(void*)*2 + 3] = ' ';
+-    tmp[sizeof(void*)*2 + 4] = '\0';
+-    print(tmp);
++    print_u64(_u(_p));
+ }
+ 
+ void print_u64(u64 p)
+-- 
+2.43.0
+
