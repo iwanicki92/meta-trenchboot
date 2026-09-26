@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: iwanicki92 <iwanicki92@gmail.com>
+Date: Sat, 26 Sep 2026 15:46:19 +0200
+Subject: [PATCH] slaunch: print dl_entry's error on the EFI path
+
+On the EFI boot path dl_entry is called by the OS after it exited the
+boot services, and a return from it means the launch failed. The OS
+cannot report GRUB's error, Xen for one treats the return as unreachable,
+so print it before returning. The legacy loaders report it themselves.
+
+Launching without a PSP is not a failure: log why none was used under
+"slaunch" debug and clear the error, so it cannot be mistaken for one.
+
+Upstream-Status: Pending
+Signed-off-by: iwanicki92 <iwanicki92@gmail.com>
+---
+ grub-core/loader/slaunch/dlstub.c | 23 ++++++++++++++++-------
+ 1 file changed, 16 insertions(+), 7 deletions(-)
+
+diff --git a/grub-core/loader/slaunch/dlstub.c b/grub-core/loader/slaunch/dlstub.c
+index f7f754b3e..309d0e8f3 100644
+--- a/grub-core/loader/slaunch/dlstub.c
++++ b/grub-core/loader/slaunch/dlstub.c
+@@ -69,14 +69,14 @@ void dl_entry (grub_uint64_t dl_ctx)
+       if (err)
+         {
+           grub_error (GRUB_ERR_BAD_DEVICE, N_("setting MTRRs for TXT SINIT failed"));
+-          return;
++          goto fail;
+         }
+ 
+       err = grub_txt_prepare_cpu ();
+       if ( err )
+         {
+           grub_error (GRUB_ERR_BAD_DEVICE, N_("prepare CPU for TXT SENTER failed"));
+-          return;
++          goto fail;
+         }
+     }
+   else if (slparams->platform_type == SLP_AMD_SKINIT)
+@@ -90,17 +90,21 @@ void dl_entry (grub_uint64_t dl_ctx)
+           if (err != GRUB_ERR_NONE)
+             {
+               grub_error (GRUB_ERR_BAD_DEVICE, N_("setup PSP TMR memory protection failed"));
+-              return;
++              goto fail;
+             }
+         }
+       else
+-        grub_tpm_relinquish_locality (0);
++        {
++          grub_dprintf ("slaunch", "launching without a PSP: %s\n", grub_errmsg);
++          grub_errno = GRUB_ERR_NONE;
++          grub_tpm_relinquish_locality (0);
++        }
+ 
+       err = grub_skinit_prepare_cpu ();
+       if ( err )
+         {
+           grub_error (GRUB_ERR_BAD_DEVICE, N_("setup CPU for SKINIT failed"));
+-          return;
++          goto fail;
+         }
+ 
+       /* Have to do this after EBS or things blow up */
+@@ -109,13 +113,13 @@ void dl_entry (grub_uint64_t dl_ctx)
+   else
+     {
+       grub_error (GRUB_ERR_BUG, N_("unknown dynamic launch platform: %d"), slparams->platform_type);
+-      return;
++      goto fail;
+     }
+ 
+   if (!(grub_rdmsr (GRUB_MSR_X86_APICBASE) & GRUB_MSR_X86_APICBASE_BSP))
+     {
+       grub_error (GRUB_ERR_BAD_DEVICE, N_("x86 dynamic launch event must be performed on the BSP"));
+-      return;
++      goto fail;
+     }
+ 
+   if (slparams->boot_type == GRUB_SL_BOOT_TYPE_LINUX || slparams->boot_type == GRUB_SL_BOOT_TYPE_MB2)
+@@ -143,4 +147,9 @@ void dl_entry (grub_uint64_t dl_ctx)
+     {
+       grub_error (GRUB_ERR_BUG, N_("unknown dynamic launch boot type: %d"), slparams->boot_type);
+     }
++
++ fail:
++  /* The OS calling here on the EFI path has no way to report the error. */
++  if (slparams->boot_type == GRUB_SL_BOOT_TYPE_EFI)
++    grub_print_error ();
+ }
+-- 
+2.43.0
+
