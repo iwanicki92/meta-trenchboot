@@ -18,6 +18,7 @@ SRC_URI = " \
     file://0011-slaunch-print-dl_entry-s-error-on-the-EFI-path.patch \
     file://0012-slaunch-print-debug-output-on-the-GOP-framebuffer-af.patch \
     file://0013-slaunch-keep-a-debug-launch-log-in-RAM-across-a-rese.patch \
+    file://0014-slaunch-relinquish-TPM-locality-0-before-SKINIT-with.patch \
 "
 
 BRANCH_grub = "tb-dev"
