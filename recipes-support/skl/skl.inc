@@ -32,6 +32,7 @@ SRC_URI = " \
     file://0018-link.lds-put-the-small-.bss-before-the-page-aligned-.patch \
     file://0019-Print-to-the-framebuffer-GRUB-describes-in-the-SLRT.patch \
     file://0020-Append-the-output-to-a-RAM-log-GRUB-describes-in-the.patch \
+    file://0021-amdsl-check-PCR-17-after-SKINIT-instead-of-guessing-.patch \
 "
 
 BRANCH = "skl-loader-amdsl-noblob"
