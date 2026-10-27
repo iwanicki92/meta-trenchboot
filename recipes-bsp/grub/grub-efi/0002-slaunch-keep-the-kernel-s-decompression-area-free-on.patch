@@ -1,4 +1,4 @@
-From f85d212bb128f2f37e35526862515674cfa897c4 Mon Sep 17 00:00:00 2001
+From 66e8669d073f8c4d266d5c70e6f451c15b3e0570 Mon Sep 17 00:00:00 2001
 From: iwanicki92 <iwanicki92@gmail.com>
 Date: Tue, 27 Oct 2026 19:00:47 +0100
 Subject: [PATCH] slaunch: keep the kernel's decompression area free on the EFI
@@ -17,11 +17,26 @@ area also held EFI runtime services data. The AMD launch takes the same
 path and boots only because of where the image lands.
 
 Load the kernel through grub_sl_efi_load_image() during a Secure Launch.
-Before any other launch allocation it walks the EFI memory map over the
-area and takes the free parts. Loader and boot services memory there is
-left as it is, nothing reads it after the launch. Any other memory makes
-it unload the image, hold its pages and load it again, so the firmware
-places it lower, up to eight times.
+The firmware places an image at the top of the highest free range that
+fits it, so GRUB first finds that place with allocations of the image's
+size and checks the area above each one. The area may hold free memory,
+loader code (GRUB's own code and heap among it), GRUB's copy of the
+bzImage and pages GRUB holds.
+Other loader memory can still receive pool allocations before
+ExitBootServices, the EFI stub's final memory map among them, and some
+firmware reads boot services memory until SetVirtualAddressMap(). A
+place whose area holds anything else is kept allocated, so the next one
+is lower. After LoadImage the map is walked again and the free parts of
+the area are taken. Should the image land elsewhere and its area not do,
+GRUB unloads it, holds its pages and loads it again, up to eight times.
+The firmware may measure every LoadImage into PCR 4, which the search
+keeps to one load when it predicts the place right. GRUB allocates these
+pages through boot services directly, since its own allocations record
+themselves in pool memory that may land in the area.
+
+Also unload the image when allocating its load options fails. That path
+returned with the image loaded, and would now leave the held pages
+allocated too.
 
 This works around the kernel's entry after the launch. TrenchBoot Linux
 v16 decompresses in the EFI stub before the launch and enters the
@@ -32,13 +47,13 @@ https://github.com/TrenchBoot/linux/tree/linux-sl-master-7-0-rel-v16
 Signed-off-by: iwanicki92 <iwanicki92@gmail.com>
 Upstream-Status: Inappropriate [workaround for the kernel's in-place decompression, see the v16 link above]
 ---
- grub-core/loader/efi/linux.c             |  23 ++-
- grub-core/loader/slaunch/x86_efi_linux.c | 210 +++++++++++++++++++++++
+ grub-core/loader/efi/linux.c             |  25 +-
+ grub-core/loader/slaunch/x86_efi_linux.c | 304 +++++++++++++++++++++++
  include/grub/slaunch.h                   |   4 +
- 3 files changed, 232 insertions(+), 5 deletions(-)
+ 3 files changed, 327 insertions(+), 6 deletions(-)
 
 diff --git a/grub-core/loader/efi/linux.c b/grub-core/loader/efi/linux.c
-index f19de49b0..00af27035 100644
+index f19de49b0..31fd91547 100644
 --- a/grub-core/loader/efi/linux.c
 +++ b/grub-core/loader/efi/linux.c
 @@ -218,11 +218,22 @@ grub_arch_efi_linux_boot_image (grub_addr_t addr, grub_size_t size, char *args)
@@ -69,6 +84,15 @@ index f19de49b0..00af27035 100644
  
    grub_dprintf ("linux", "linux command line: '%s'\n", args);
  
+@@ -238,7 +249,7 @@ grub_arch_efi_linux_boot_image (grub_addr_t addr, grub_size_t size, char *args)
+   loaded_image->load_options =
+     grub_efi_allocate_any_pages (GRUB_EFI_BYTES_TO_PAGES (len));
+   if (!loaded_image->load_options)
+-    return grub_errno;
++    goto unload;
+ 
+   loaded_image->load_options_size =
+     2 * grub_utf8_to_utf16 (loaded_image->load_options, len,
 @@ -272,6 +283,8 @@ grub_arch_efi_linux_boot_image (grub_addr_t addr, grub_size_t size, char *args)
  		       GRUB_EFI_BYTES_TO_PAGES (len));
    loaded_image->load_options = NULL;
@@ -79,31 +103,37 @@ index f19de49b0..00af27035 100644
  
    return grub_errno;
 diff --git a/grub-core/loader/slaunch/x86_efi_linux.c b/grub-core/loader/slaunch/x86_efi_linux.c
-index f25aa90ca..b4a1998ba 100644
+index f25aa90ca..a2a55a598 100644
 --- a/grub-core/loader/slaunch/x86_efi_linux.c
 +++ b/grub-core/loader/slaunch/x86_efi_linux.c
-@@ -260,6 +260,216 @@ allocate_aligned_efi_pages (grub_efi_physical_address_t max_address,
+@@ -260,6 +260,310 @@ allocate_aligned_efi_pages (grub_efi_physical_address_t max_address,
    return mem;
  }
  
-+#define SL_KERNEL_AREA_MAX_RUNS	16
++#define SL_KERNEL_AREA_MAX_RUNS	32
 +
-+/* What GRUB holds for the kernel: its decompression area, skipped placements */
++/*
++ * What GRUB holds for the kernel: its decompression area, skipped places.
++ * Allocated through boot services directly: GRUB's own allocations record
++ * themselves in pool memory, which may land in the area.
++ */
 +static struct
 +{
-+  grub_addr_t addr;
-+  grub_size_t pages;
++  grub_efi_physical_address_t addr;
++  grub_efi_uintn_t pages;
 +} sl_kernel_area[SL_KERNEL_AREA_MAX_RUNS];
 +static unsigned int sl_kernel_area_runs;
 +
 +static void
 +sl_efi_release_runs (unsigned int keep)
 +{
++  grub_efi_boot_services_t *b = grub_efi_system_table->boot_services;
++
 +  while (sl_kernel_area_runs > keep)
 +    {
 +      sl_kernel_area_runs--;
-+      grub_efi_free_pages (sl_kernel_area[sl_kernel_area_runs].addr,
-+                           sl_kernel_area[sl_kernel_area_runs].pages);
++      b->free_pages (sl_kernel_area[sl_kernel_area_runs].addr,
++                     sl_kernel_area[sl_kernel_area_runs].pages);
 +    }
 +}
 +
@@ -113,20 +143,51 @@ index f25aa90ca..b4a1998ba 100644
 +  sl_efi_release_runs (0);
 +}
 +
++static grub_err_t
++sl_efi_add_run (grub_efi_physical_address_t addr, grub_efi_uintn_t pages)
++{
++  /* Not OUT_OF_RANGE: another place would only take more runs */
++  if (sl_kernel_area_runs == SL_KERNEL_AREA_MAX_RUNS)
++    return grub_error (GRUB_ERR_OUT_OF_MEMORY,
++                       N_("kernel decompression area too fragmented"));
++  sl_kernel_area[sl_kernel_area_runs].addr = addr;
++  sl_kernel_area[sl_kernel_area_runs].pages = pages;
++  sl_kernel_area_runs++;
++  return GRUB_ERR_NONE;
++}
++
++static grub_uint64_t
++sl_efi_overlap (grub_uint64_t s, grub_uint64_t e, grub_uint64_t rs,
++                grub_uint64_t re)
++{
++  if (rs < s)
++    rs = s;
++  if (re > e)
++    re = e;
++  return re > rs ? re - rs : 0;
++}
++
 +/*
 + * After the launch, the kernel decompresses itself in place: from startup_32
 + * aligned up to kernel_alignment, init_size bytes, which reaches past the
 + * loaded image. Take the free memory there before anything else is allocated
-+ * in it. Loader and boot services memory may lie there too, nothing reads
-+ * them after the launch. Any other memory there is an error.
++ * in it. Besides free memory, the area may only hold loader code (GRUB's
++ * own code and heap among it), GRUB's copy of the bzImage and the runs GRUB
++ * already holds. Pool allocations
++ * can still land in other loader memory before ExitBootServices, and some
++ * firmware reads boot services memory until SetVirtualAddressMap(). With
++ * check_only, only check that the area would do for an image at image_base.
 + */
 +static grub_err_t
-+sl_efi_reserve_kernel_area (void *kernel_addr,
-+                            grub_efi_loaded_image_t *loaded_image)
++sl_efi_reserve_kernel_area (void *kernel_addr, grub_size_t kernel_size,
++                            grub_addr_t image_base, grub_size_t image_size,
++                            bool check_only)
 +{
++  grub_efi_boot_services_t *b = grub_efi_system_table->boot_services;
 +  struct linux_kernel_params *lh = (struct linux_kernel_params *)kernel_addr;
-+  grub_addr_t image_base = (grub_addr_t)loaded_image->image_base;
 +  grub_uint64_t load, dest, start, end, covered = 0;
++  grub_uint64_t kbuf = (grub_addr_t)kernel_addr;
++  grub_uint64_t kbuf_end = kbuf + ALIGN_UP (kernel_size, GRUB_EFI_PAGE_SIZE);
 +  grub_efi_memory_descriptor_t *memory_map, *desc;
 +  grub_efi_uintn_t memory_map_size, desc_size;
 +  grub_err_t err = GRUB_ERR_NONE;
@@ -141,7 +202,7 @@ index f25aa90ca..b4a1998ba 100644
 +        dest = grub_le_to_cpu64 (lh->pref_address);
 +    }
 +
-+  start = ALIGN_UP (image_base + loaded_image->image_size, GRUB_EFI_PAGE_SIZE);
++  start = ALIGN_UP (image_base + image_size, GRUB_EFI_PAGE_SIZE);
 +  if (start < dest)
 +    start = dest;
 +  end = ALIGN_UP (dest + grub_le_to_cpu32 (lh->init_size), GRUB_EFI_PAGE_SIZE);
@@ -166,6 +227,7 @@ index f25aa90ca..b4a1998ba 100644
 +    {
 +      grub_uint64_t ds = desc->physical_start;
 +      grub_uint64_t de = ds + (desc->num_pages << GRUB_EFI_PAGE_SHIFT);
++      grub_uint64_t held;
 +
 +      if (de <= start || ds >= end)
 +        continue;
@@ -177,20 +239,22 @@ index f25aa90ca..b4a1998ba 100644
 +
 +      if (desc->type == GRUB_EFI_CONVENTIONAL_MEMORY)
 +        {
-+          if (sl_kernel_area_runs == SL_KERNEL_AREA_MAX_RUNS)
-+            {
-+              err = grub_error (GRUB_ERR_OUT_OF_RANGE,
-+                                N_("kernel decompression area too fragmented"));
-+              break;
-+            }
-+          sl_kernel_area[sl_kernel_area_runs].addr = ds;
-+          sl_kernel_area[sl_kernel_area_runs].pages = GRUB_EFI_BYTES_TO_PAGES (de - ds);
-+          sl_kernel_area_runs++;
++          err = sl_efi_add_run (ds, GRUB_EFI_BYTES_TO_PAGES (de - ds));
++          if (err != GRUB_ERR_NONE)
++            break;
++          continue;
 +        }
-+      else if (desc->type != GRUB_EFI_LOADER_CODE
-+               && desc->type != GRUB_EFI_LOADER_DATA
-+               && desc->type != GRUB_EFI_BOOT_SERVICES_CODE
-+               && desc->type != GRUB_EFI_BOOT_SERVICES_DATA)
++      if (desc->type == GRUB_EFI_LOADER_CODE)
++        continue;
++
++      /* The firmware merges neighbouring descriptors of the same type */
++      held = sl_efi_overlap (ds, de, kbuf, kbuf_end);
++      for (i = 0; i < first; i++)
++        held += sl_efi_overlap (ds, de, sl_kernel_area[i].addr,
++                                sl_kernel_area[i].addr
++                                + ((grub_uint64_t)sl_kernel_area[i].pages
++                                   << GRUB_EFI_PAGE_SHIFT));
++      if (held != de - ds)
 +        {
 +          err = grub_error (GRUB_ERR_OUT_OF_RANGE,
 +                            N_("kernel decompression area 0x%" PRIxGRUB_UINT64_T
@@ -206,7 +270,7 @@ index f25aa90ca..b4a1998ba 100644
 +                      N_("kernel decompression area 0x%" PRIxGRUB_UINT64_T
 +                         "-0x%" PRIxGRUB_UINT64_T " is not all memory"), start, end);
 +
-+  if (err != GRUB_ERR_NONE)
++  if (err != GRUB_ERR_NONE || check_only)
 +    {
 +      sl_kernel_area_runs = first;
 +      return err;
@@ -214,12 +278,20 @@ index f25aa90ca..b4a1998ba 100644
 +
 +  /* Allocating changes the memory map, so only now that it was walked */
 +  for (i = first; i < sl_kernel_area_runs; i++)
-+    if (!grub_efi_allocate_fixed (sl_kernel_area[i].addr, sl_kernel_area[i].pages))
-+      {
-+        sl_kernel_area_runs = i;
-+        sl_efi_release_runs (first);
-+        return grub_errno;
-+      }
++    {
++      grub_efi_physical_address_t addr = sl_kernel_area[i].addr;
++
++      if (b->allocate_pages (GRUB_EFI_ALLOCATE_ADDRESS, GRUB_EFI_LOADER_DATA,
++                             sl_kernel_area[i].pages, &addr) == GRUB_EFI_SUCCESS)
++        continue;
++      sl_kernel_area_runs = i;
++      sl_efi_release_runs (first);
++      /* A firmware allocation took part of the area after the walk */
++      return grub_error (GRUB_ERR_OUT_OF_RANGE,
++                         N_("kernel decompression area 0x%" PRIxGRUB_UINT64_T
++                            "-0x%" PRIxGRUB_UINT64_T " changed while reserving it"),
++                         start, end);
++    }
 +
 +  grub_dprintf ("slaunch", "reserved kernel decompression area 0x%" PRIxGRUB_UINT64_T
 +                "-0x%" PRIxGRUB_UINT64_T "\n", start, end);
@@ -227,6 +299,49 @@ index f25aa90ca..b4a1998ba 100644
 +}
 +
 +#define SL_KERNEL_LOAD_TRIES	8
++
++/*
++ * The firmware places an image at the top of the highest free range that
++ * fits it. Find that place with allocations of the image's size, holding
++ * each one whose decompression area would not do, so that LoadImage usually
++ * runs once. Each LoadImage may be measured into PCR 4.
++ */
++static void
++sl_efi_find_kernel_place (void *kernel_addr, grub_size_t kernel_size)
++{
++  grub_efi_boot_services_t *b = grub_efi_system_table->boot_services;
++  struct grub_msdos_image_header *header = kernel_addr;
++  struct grub_pe_image_header *pe;
++  grub_efi_physical_address_t place;
++  grub_size_t image_size, pages;
++  grub_err_t err;
++  unsigned int i;
++
++  pe = (struct grub_pe_image_header *)((char *)kernel_addr
++                                       + header->pe_image_header_offset);
++  image_size = pe->optional_header.image_size;
++  pages = GRUB_EFI_BYTES_TO_PAGES (image_size);
++
++  for (i = 0; i < SL_KERNEL_LOAD_TRIES; i++)
++    {
++      place = GRUB_EFI_MAX_USABLE_ADDRESS;
++      if (b->allocate_pages (GRUB_EFI_ALLOCATE_MAX_ADDRESS, GRUB_EFI_LOADER_CODE,
++                             pages, &place) != GRUB_EFI_SUCCESS)
++        break;
++
++      err = sl_efi_reserve_kernel_area (kernel_addr, kernel_size, place,
++                                        image_size, true);
++      if (err != GRUB_ERR_OUT_OF_RANGE
++          || sl_efi_add_run (place, pages) != GRUB_ERR_NONE)
++        {
++          b->free_pages (place, pages);
++          break;
++        }
++      grub_dprintf ("slaunch", "%s, skipping the place\n", grub_errmsg);
++      grub_errno = GRUB_ERR_NONE;
++    }
++  grub_errno = GRUB_ERR_NONE;
++}
 +
 +/*
 + * LoadImage the kernel and reserve its decompression area. When the area
@@ -239,11 +354,13 @@ index f25aa90ca..b4a1998ba 100644
 +{
 +  grub_efi_boot_services_t *b = grub_efi_system_table->boot_services;
 +  grub_efi_loaded_image_t *loaded_image;
++  grub_efi_physical_address_t base;
 +  grub_efi_status_t status;
-+  grub_addr_t base;
 +  grub_size_t pages;
 +  grub_err_t err;
 +  unsigned int i;
++
++  sl_efi_find_kernel_place (kernel_addr, kernel_size);
 +
 +  for (i = 1; ; i++)
 +    {
@@ -260,7 +377,9 @@ index f25aa90ca..b4a1998ba 100644
 +      if (loaded_image == NULL)
 +        return GRUB_ERR_NONE;
 +
-+      err = sl_efi_reserve_kernel_area (kernel_addr, loaded_image);
++      err = sl_efi_reserve_kernel_area (kernel_addr, kernel_size,
++                                        (grub_addr_t)loaded_image->image_base,
++                                        loaded_image->image_size, false);
 +      if (err != GRUB_ERR_OUT_OF_RANGE || i == SL_KERNEL_LOAD_TRIES)
 +        {
 +          if (err != GRUB_ERR_NONE)
@@ -275,20 +394,19 @@ index f25aa90ca..b4a1998ba 100644
 +      pages = GRUB_EFI_BYTES_TO_PAGES (loaded_image->image_size);
 +      b->unload_image (*image_handle);
 +
-+      if (sl_kernel_area_runs == SL_KERNEL_AREA_MAX_RUNS)
++      if (b->allocate_pages (GRUB_EFI_ALLOCATE_ADDRESS, GRUB_EFI_LOADER_DATA,
++                             pages, &base) != GRUB_EFI_SUCCESS)
 +        {
-+          err = grub_error (GRUB_ERR_OUT_OF_RANGE,
-+                            N_("kernel decompression area too fragmented"));
++          err = grub_error (GRUB_ERR_OUT_OF_MEMORY,
++                            N_("cannot hold the kernel's last place"));
 +          break;
 +        }
-+      if (!grub_efi_allocate_fixed (base, pages))
++      err = sl_efi_add_run (base, pages);
++      if (err != GRUB_ERR_NONE)
 +        {
-+          err = grub_errno;
++          b->free_pages (base, pages);
 +          break;
 +        }
-+      sl_kernel_area[sl_kernel_area_runs].addr = base;
-+      sl_kernel_area[sl_kernel_area_runs].pages = pages;
-+      sl_kernel_area_runs++;
 +    }
 +
 +  if (err != GRUB_ERR_NONE)
@@ -321,6 +439,3 @@ index 7100931b7..5c120db4a 100644
  
  #endif /* ASM_FILE */
  
--- 
-2.43.0
-
