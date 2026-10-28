@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: iwanicki92 <iwanicki92@gmail.com>
+Date: Sat, 26 Sep 2026 15:45:04 +0200
+Subject: [PATCH] slaunch: mark the EFI boot services finished in dl_entry
+
+On the EFI boot path the OS exits the boot services and then calls
+dl_entry through the SLRT's dl_handler. GRUB still has grub_efi_is_finished
+clear at that point, so with "set debug=slaunch" the grub_dprintf calls on
+the launch path (the PSP lookup, the TMR setup) write to the EFI console
+through ConOut, whose firmware code may already be gone. The machine then
+hangs or takes an exception (#UD or #DB at a low RIP) before SKINIT.
+
+Set grub_efi_is_finished when entering dl_entry on the EFI path, as GRUB
+does when it exits the boot services itself. The EFI console then drops
+the output, and the serial terminal still prints it.
+
+Upstream-Status: Pending
+Signed-off-by: iwanicki92 <iwanicki92@gmail.com>
+---
+ grub-core/loader/slaunch/dlstub.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/grub-core/loader/slaunch/dlstub.c b/grub-core/loader/slaunch/dlstub.c
+index dbbd46f7d..f7f754b3e 100644
+--- a/grub-core/loader/slaunch/dlstub.c
++++ b/grub-core/loader/slaunch/dlstub.c
+@@ -33,6 +33,10 @@
+ #include <grub/i386/txt.h>
+ #include <grub/i386/skinit.h>
+ 
++#ifdef GRUB_MACHINE_EFI
++#include <grub/efi/efi.h>
++#endif
++
+ GRUB_MOD_LICENSE ("GPLv3+");
+ 
+ extern void dl_trampoline(grub_uint32_t dce_base, grub_uint32_t dce_size, grub_uint32_t platform);
+@@ -44,6 +48,15 @@ void dl_entry (grub_uint64_t dl_ctx)
+   struct grub_relocator32_state state = {0};
+   grub_err_t err;
+ 
++#ifdef GRUB_MACHINE_EFI
++  /*
++   * On the EFI boot path the OS calls here after it has exited the boot
++   * services, so the EFI console and memory services must not be used.
++   */
++  if (slparams->boot_type == GRUB_SL_BOOT_TYPE_EFI)
++    grub_efi_is_finished = 1;
++#endif
++
+   state.edi = slparams->platform_type;
+ 
+   /* This is done on both Intel and AMD platforms */
+-- 
+2.43.0
+

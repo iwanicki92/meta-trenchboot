@@ -9,6 +9,8 @@ require recipes-extended/xen/xen-hypervisor.inc
 SRC_URI:append = " \
     file://0001-x86-slaunch-release-the-PSP-TMR-once-the-AMD-IOMMU-i.patch \
     file://0002-x86-slaunch-lock-the-DRTM-TPM-localities-on-reboot-a.patch \
+    file://0003-x86-tpm-skip-the-digests-the-early-log-has-no-bank-f.patch \
+    file://0004-x86-smpboot-fix-the-GDT-limit-in-the-TXT-MLE-JOIN-st.patch \
     file://xen.cfg \
 "
 

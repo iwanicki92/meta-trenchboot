@@ -1,0 +1,48 @@
+From 719eed0edda78e11af2a7a09eeb87091063b72a3 Mon Sep 17 00:00:00 2001
+From: iwanicki92 <iwanicki92@gmail.com>
+Date: Mon, 28 Sep 2026 20:28:44 +0200
+Subject: [PATCH] slaunch: relinquish TPM locality 0 before SKINIT with a PSP
+ too
+
+dl_entry releases locality 0 before SKINIT only when it finds no PSP.
+With a PSP, locality 0 stays as the firmware left it. Where the firmware
+left it active, PCR 17 still held its startup value after SKINIT and
+DRTM_CMD_LAUNCH failed. A loader that releases locality 0 first got the
+SKINIT measurement on the same firmware.
+
+Release locality 0 on every SKINIT launch.
+
+Upstream-Status: Pending
+Signed-off-by: iwanicki92 <iwanicki92@gmail.com>
+---
+ grub-core/loader/slaunch/dlstub.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/grub-core/loader/slaunch/dlstub.c b/grub-core/loader/slaunch/dlstub.c
+index cb7063330..2ae1bd2c4 100644
+--- a/grub-core/loader/slaunch/dlstub.c
++++ b/grub-core/loader/slaunch/dlstub.c
+@@ -87,6 +87,12 @@ void dl_entry (grub_uint64_t dl_ctx)
+     {
+       grub_skl_link_amd_info (slparams);
+ 
++      /*
++       * SKINIT's locality 4 measurement may not reach the TPM while locality
++       * 0 is active, so release it whether or not a PSP runs the launch.
++       */
++      grub_tpm_relinquish_locality (0);
++
+       err = grub_psp_discover ();
+       if (err == GRUB_ERR_NONE)
+         {
+@@ -101,7 +107,6 @@ void dl_entry (grub_uint64_t dl_ctx)
+         {
+           grub_dprintf ("slaunch", "launching without a PSP: %s\n", grub_errmsg);
+           grub_errno = GRUB_ERR_NONE;
+-          grub_tpm_relinquish_locality (0);
+         }
+ 
+       err = grub_skinit_prepare_cpu ();
+-- 
+2.43.0
+

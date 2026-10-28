@@ -1,0 +1,73 @@
+From e01e2f45a8391b92c3023ea5e0217882f9b549eb Mon Sep 17 00:00:00 2001
+From: iwanicki92 <iwanicki92@gmail.com>
+Date: Sat, 26 Sep 2026 16:59:39 +0200
+Subject: [PATCH] link.lds: put the small .bss before the page-aligned data
+
+The page tables and the IOMMU device table are page aligned, and .bss
+started with them on the next page after the measured image, so up to
+4 KiB right after it went unused. The 64-bit build is the tight one: 28
+KiB of page tables, and GRUB wants 4 KiB of the 64 KiB for the SLRT
+after bootloader_data. Link the small .bss into its own section first,
+where it fills that space, and the page-aligned data after it.
+
+The two share a LOAD segment with the code, so the RWX segment warning
+is turned off. skl.bin is a flat binary and the segments do not matter.
+
+Upstream-Status: Inappropriate [debug]
+Signed-off-by: iwanicki92 <iwanicki92@gmail.com>
+---
+ Makefile |  2 ++
+ link.lds | 15 ++++++++++++---
+ 2 files changed, 14 insertions(+), 3 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index 8bebbc5..a6995c3 100644
+--- a/Makefile
++++ b/Makefile
+@@ -37,6 +37,8 @@ endif
+ CFLAGS  += -Os -g -MMD -MP -mno-sse -mno-mmx -fpie -fomit-frame-pointer
+ CFLAGS  += -Iinclude -ffreestanding -fno-common -Wall -Werror
+ LDFLAGS += -nostdlib -no-pie -Wl,--build-id=none,--fatal-warnings,--defsym=BITS=$(BITS)
++# One segment holds the code and the small .bss, see link.lds.
++LDFLAGS += -Wl,--no-warn-rwx-segments
+ 
+ CFLAGS_TPMLIB := -include boot.h -include errno-base.h -include byteswap.h -DEBADRQC=EINVAL
+ 
+diff --git a/link.lds b/link.lds
+index 26a6fad..d642a0d 100644
+--- a/link.lds
++++ b/link.lds
+@@ -68,9 +68,18 @@ SECTIONS
+ 		*(.skl_pubkey_modulus)
+ 	}
+ 
++	. = ALIGN(4);
++	_bss = .;
++
++	/*
++	 * The small data comes first, in a section of its own, so it fills the
++	 * space the page alignment of .bss would otherwise waste.
++	 */
++	.bss_small : {
++		*(SORT_BY_ALIGNMENT(.bss))
++	}
++
+ 	.bss : {
+-		. = ALIGN(4096);
+-		_bss = .;
+ 		/*
+ 		 * Due to the 64k total size constraint, we link all page size/aligned
+ 		 * data together in a single section, to avoid wasting space in the
+@@ -78,8 +87,8 @@ SECTIONS
+ 		 */
+ 		*(SORT_BY_ALIGNMENT(.bss*))
+ 		. = ALIGN(4);
+-		_ebss = .;
+ 	}
++	_ebss = .;
+ 
+ 	/*
+ 	 * Bootloader must pass non-constant data (e.g. address of kernel). Keep
+-- 
+2.43.0
+

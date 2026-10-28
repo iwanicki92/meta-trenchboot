@@ -21,6 +21,7 @@ SRC_URI = "\
     file://debug.cfg \
     file://efi.cfg \
     file://0001-slaunch.c-Set-MSI-PRO-B850-MZ33-AR1-PSP-version.patch \
+    file://0002-slaunch-find-the-PSP-through-configuration-space.patch \
 "
 SRCREV_machine = "dbbb5ef0d915435b20290766f99461e31c273b6c"
 SRCREV_meta = "49698cadd79745fa26aa7ef507c16902250c1750"

@@ -1,0 +1,461 @@
+From 7f9d1a06e18cccf4feea861f25e944f8e8922f29 Mon Sep 17 00:00:00 2001
+From: iwanicki92 <iwanicki92@gmail.com>
+Date: Sat, 26 Sep 2026 19:54:56 +0200
+Subject: [PATCH] slaunch: keep a debug launch log in RAM across a reset
+
+For platforms with neither a serial port nor a usable framebuffer. With
+"slaunch" debug on, the slaunch command claims a fixed region, 256 KiB at
+256 MiB unless slaunch_log_addr and slaunch_log_size say otherwise, as
+reserved memory so the OS leaves it alone. GRUB's output goes there as a
+terminal, a debug-only SLRT entry passes it on to the SKL, and dl_entry
+flushes the caches before the launch. A reset usually leaves DRAM alone,
+so the new slaunch_log command shows the last launch's output on the
+next boot.
+
+The entry, tag 0x8001, is not in the SLRT specification.
+
+Upstream-Status: Inappropriate [debug]
+Signed-off-by: iwanicki92 <iwanicki92@gmail.com>
+---
+ grub-core/Makefile.core.def        |   2 +
+ grub-core/loader/slaunch/dlstub.c  |   1 +
+ grub-core/loader/slaunch/log.c     | 291 +++++++++++++++++++++++++++++
+ grub-core/loader/slaunch/skl.c     |   1 +
+ grub-core/loader/slaunch/slaunch.c |   4 +
+ include/grub/slaunch.h             |  11 ++
+ include/grub/slr_table.h           |  24 +++
+ 7 files changed, 334 insertions(+)
+ create mode 100644 grub-core/loader/slaunch/log.c
+
+diff --git a/grub-core/Makefile.core.def b/grub-core/Makefile.core.def
+index 70127010a..7c0e1888a 100644
+--- a/grub-core/Makefile.core.def
++++ b/grub-core/Makefile.core.def
+@@ -1907,6 +1907,8 @@ module = {
+   x86_64_efi = loader/slaunch/x86_efi_linux.c;
+   i386_efi = loader/slaunch/fb.c;
+   x86_64_efi = loader/slaunch/fb.c;
++  i386_efi = loader/slaunch/log.c;
++  x86_64_efi = loader/slaunch/log.c;
+   enable = x86;
+ };
+ 
+diff --git a/grub-core/loader/slaunch/dlstub.c b/grub-core/loader/slaunch/dlstub.c
+index 58160fdd1..cb7063330 100644
+--- a/grub-core/loader/slaunch/dlstub.c
++++ b/grub-core/loader/slaunch/dlstub.c
+@@ -131,6 +131,7 @@ void dl_entry (grub_uint64_t dl_ctx)
+ 
+   if (slparams->platform_type == SLP_AMD_SKINIT)
+     grub_slaunch_fb_fill_slrt (slparams);
++  grub_slaunch_log_flush ();
+ 
+   if (slparams->boot_type == GRUB_SL_BOOT_TYPE_LINUX || slparams->boot_type == GRUB_SL_BOOT_TYPE_MB2)
+     {
+diff --git a/grub-core/loader/slaunch/log.c b/grub-core/loader/slaunch/log.c
+new file mode 100644
+index 000000000..e74be38bb
+--- /dev/null
++++ b/grub-core/loader/slaunch/log.c
+@@ -0,0 +1,291 @@
++/*
++ *  GRUB  --  GRand Unified Bootloader
++ *  Copyright (C) 2026  Free Software Foundation, Inc.
++ *
++ *  GRUB is free software: you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License as published by
++ *  the Free Software Foundation, either version 3 of the License, or
++ *  (at your option) any later version.
++ *
++ *  GRUB is distributed in the hope that it will be useful,
++ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
++ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ *  GNU General Public License for more details.
++ *
++ *  You should have received a copy of the GNU General Public License
++ *  along with GRUB.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/*
++ * Debug-only launch log in RAM, for platforms without a serial port. With
++ * debug=slaunch the slaunch command claims a fixed region, keeps GRUB's
++ * output there as a terminal and passes it on to the SKL through the SLRT.
++ * A reset usually leaves DRAM alone, so the slaunch_log command shows the
++ * last launch's output on the next boot.
++ */
++
++#include <grub/types.h>
++#include <grub/misc.h>
++#include <grub/env.h>
++#include <grub/term.h>
++#include <grub/command.h>
++#include <grub/normal.h>
++#include <grub/i18n.h>
++#include <grub/efi/efi.h>
++#include <grub/efi/api.h>
++#include <grub/slr_table.h>
++#include <grub/slaunch.h>
++
++/* Low, away from the top-down allocations of the firmware and the loaders. */
++#define LOG_DEFAULT_ADDR	0x10000000
++#define LOG_DEFAULT_SIZE	0x40000
++
++/* Wide and tall enough that GRUB neither wraps nor pages for it. */
++#define LOG_WIDTH		512
++#define LOG_HEIGHT		0xfffe
++
++static struct grub_slaunch_log *log;
++static grub_uint16_t log_x, log_y;
++static grub_command_t cmd_slaunch_log;
++
++static grub_uint64_t
++log_env (const char *name, grub_uint64_t def)
++{
++  const char *s = grub_env_get (name);
++  const char *end;
++  grub_uint64_t v;
++
++  if (s == NULL)
++    return def;
++
++  v = grub_strtoull (s, &end, 0);
++  if (grub_errno != GRUB_ERR_NONE || *end != '\0')
++    {
++      grub_errno = GRUB_ERR_NONE;
++      return def;
++    }
++
++  return v;
++}
++
++/* The region and its header, or NULL when it does not hold a log. */
++static struct grub_slaunch_log *
++log_region (grub_uint64_t *size)
++{
++  grub_uint64_t addr = log_env ("slaunch_log_addr", LOG_DEFAULT_ADDR);
++  struct grub_slaunch_log *l;
++
++  *size = log_env ("slaunch_log_size", LOG_DEFAULT_SIZE);
++
++  /* The SKL cannot reach above 4 GiB. */
++  if (addr == 0 || (addr & 0xfff) || *size < 0x1000 || (*size & 0xfff)
++      || *size > 0x100000000ULL || addr > 0x100000000ULL - *size)
++    return NULL;
++
++  l = (struct grub_slaunch_log *) (grub_addr_t) addr;
++  return l;
++}
++
++static void
++log_putc (char c)
++{
++  log->data[log->head] = c;
++  if (++log->head == log->size)
++    {
++      log->head = 0;
++      log->wrapped = 1;
++    }
++}
++
++static void
++log_putchar (struct grub_term_output *term __attribute__ ((unused)),
++	     const struct grub_unicode_glyph *c)
++{
++  switch (c->base)
++    {
++    case '\n':
++      log_x = 0;
++      if (log_y < LOG_HEIGHT - 1)
++	log_y++;
++      break;
++    case '\r':
++      log_x = 0;
++      break;
++    case '\b':
++      if (log_x > 0)
++	log_x--;
++      break;
++    default:
++      log_x++;
++    }
++
++  log_putc (c->base < 0x80 ? c->base : '?');
++}
++
++static struct grub_term_coordinate
++log_getwh (struct grub_term_output *term __attribute__ ((unused)))
++{
++  return (struct grub_term_coordinate) { LOG_WIDTH, LOG_HEIGHT };
++}
++
++static struct grub_term_coordinate
++log_getxy (struct grub_term_output *term __attribute__ ((unused)))
++{
++  return (struct grub_term_coordinate) { log_x, log_y };
++}
++
++static void
++log_gotoxy (struct grub_term_output *term __attribute__ ((unused)),
++	    struct grub_term_coordinate pos)
++{
++  log_x = pos.x;
++  log_y = pos.y;
++}
++
++static void
++log_cls (struct grub_term_output *term __attribute__ ((unused)))
++{
++  log_x = log_y = 0;
++}
++
++static struct grub_term_output log_term =
++  {
++    .name = "slaunch_log",
++    .putchar = log_putchar,
++    .getwh = log_getwh,
++    .getxy = log_getxy,
++    .gotoxy = log_gotoxy,
++    .cls = log_cls,
++    .flags = GRUB_TERM_CODE_TYPE_ASCII,
++  };
++
++void
++grub_slaunch_log_start (void)
++{
++  struct grub_slaunch_log *l;
++  grub_uint64_t size;
++
++  if (log != NULL || !grub_debug_enabled ("slaunch"))
++    return;
++
++  l = log_region (&size);
++  if (l == NULL)
++    {
++      grub_dprintf ("slaunch", "no launch log, bad slaunch_log_addr or size\n");
++      return;
++    }
++
++  /* Reserved, so the OS leaves it alone after a launch that works. */
++  if (grub_efi_allocate_pages_real ((grub_addr_t) l, size >> 12,
++				    GRUB_EFI_ALLOCATE_ADDRESS,
++				    GRUB_EFI_RESERVED_MEMORY_TYPE) == NULL)
++    {
++      grub_errno = GRUB_ERR_NONE;
++      grub_dprintf ("slaunch", "no launch log, 0x%llx is in use\n",
++		    (unsigned long long) (grub_addr_t) l);
++      return;
++    }
++
++  l->magic = GRUB_SLAUNCH_LOG_MAGIC;
++  l->size = size - sizeof (*l);
++  l->head = 0;
++  l->wrapped = 0;
++  l->reserved = 0;
++  log = l;
++
++  grub_term_register_output_active ("slaunch_log", &log_term);
++  grub_dprintf ("slaunch", "launch log at 0x%llx, %llu KiB\n",
++		(unsigned long long) (grub_addr_t) l,
++		(unsigned long long) size >> 10);
++}
++
++void
++grub_slaunch_log_add_slrt (struct grub_slr_table *slrt)
++{
++  struct grub_slr_entry_debug_log entry = {
++    .hdr.tag = GRUB_SLR_ENTRY_DEBUG_LOG,
++    .hdr.size = sizeof (entry),
++  };
++
++  if (log == NULL)
++    return;
++
++  entry.base = (grub_addr_t) log;
++  entry.size = sizeof (*log) + log->size;
++  grub_slr_add_entry (slrt, &entry.hdr);
++}
++
++/* A reset loses dirty cache lines. */
++void
++grub_slaunch_log_flush (void)
++{
++  if (log != NULL)
++    asm volatile ("wbinvd" : : : "memory");
++}
++
++static grub_err_t
++grub_cmd_slaunch_log (grub_command_t cmd __attribute__ ((unused)),
++		      int argc __attribute__ ((unused)),
++		      char *argv[] __attribute__ ((unused)))
++{
++  struct grub_slaunch_log *l;
++  const char *pager;
++  grub_uint64_t size;
++  grub_uint32_t i, start, len;
++
++  l = log_region (&size);
++  if (l == NULL)
++    return grub_error (GRUB_ERR_BAD_ARGUMENT,
++		       N_("bad slaunch_log_addr or slaunch_log_size"));
++
++  /* Normal after a power cycle or before the first launch, so no error. */
++  if (l->magic != GRUB_SLAUNCH_LOG_MAGIC || l->size != size - sizeof (*l)
++      || l->head >= l->size)
++    grub_printf ("warning: no launch log at 0x%llx\n",
++		 (unsigned long long) (grub_addr_t) l);
++  else
++    {
++      start = l->wrapped ? l->head : 0;
++      len = l->wrapped ? l->size : l->head;
++      grub_printf ("Launch log at 0x%llx, %u bytes%s:\n",
++		   (unsigned long long) (grub_addr_t) l, len,
++		   l->wrapped ? ", the oldest overwritten" : "");
++
++      /*
++       * Paged only here: "set pager=1" in a menu entry would stay on and
++       * stop a launch whose debug output fills the screen.
++       */
++      grub_set_more (1);
++      for (i = 0; i < len; i++)
++	{
++	  char c = l->data[(start + i) % l->size];
++
++	  if (c == '\n' || c == '\t' || (c >= ' ' && c <= '~'))
++	    grub_printf ("%c", c);
++	}
++      pager = grub_env_get ("pager");
++      grub_set_more (pager != NULL && *pager == '1');
++    }
++
++  /* A menu entry would redraw the menu over it straight away. */
++  grub_printf ("\nPress any key to continue...");
++  grub_getkey ();
++  grub_printf ("\n");
++
++  return GRUB_ERR_NONE;
++}
++
++void
++grub_slaunch_log_init (void)
++{
++  cmd_slaunch_log = grub_register_command ("slaunch_log", grub_cmd_slaunch_log,
++					   NULL,
++					   N_("Show the last launch's debug log"));
++}
++
++void
++grub_slaunch_log_fini (void)
++{
++  if (cmd_slaunch_log)
++    grub_unregister_command (cmd_slaunch_log);
++}
+diff --git a/grub-core/loader/slaunch/skl.c b/grub-core/loader/slaunch/skl.c
+index 3c8bb46cf..09907578d 100644
+--- a/grub-core/loader/slaunch/skl.c
++++ b/grub-core/loader/slaunch/skl.c
+@@ -254,6 +254,7 @@ grub_skl_prepare_bootloader_data (struct grub_slaunch_params *slparams)
+ 
+   /* Filled in dl_entry, when the framebuffer's mode is final */
+   grub_slaunch_fb_add_slrt (slrt);
++  grub_slaunch_log_add_slrt (slrt);
+ 
+   return GRUB_ERR_NONE;
+ }
+diff --git a/grub-core/loader/slaunch/slaunch.c b/grub-core/loader/slaunch/slaunch.c
+index c75a08442..e0c3dc696 100644
+--- a/grub-core/loader/slaunch/slaunch.c
++++ b/grub-core/loader/slaunch/slaunch.c
+@@ -95,6 +95,7 @@ grub_cmd_slaunch (grub_command_t cmd __attribute__ ((unused)),
+     return grub_error (GRUB_ERR_UNKNOWN_DEVICE, N_("CPU is unsupported"));
+ 
+   grub_slaunch_fb_capture ();
++  grub_slaunch_log_start ();
+ 
+   return GRUB_ERR_NONE;
+ }
+@@ -217,10 +218,13 @@ GRUB_MOD_INIT (slaunch)
+ 					      NULL, N_("Load secure launcher module from file"));
+   cmd_slaunch_state = grub_register_command ("slaunch_state", grub_cmd_slaunch_state,
+ 					     NULL, N_("Display secure launcher state"));
++  grub_slaunch_log_init ();
+ }
+ 
+ GRUB_MOD_FINI (slaunch)
+ {
++  grub_slaunch_log_fini ();
++
+   if (cmd_slaunch_state)
+     grub_unregister_command (cmd_slaunch_state);
+ 
+diff --git a/include/grub/slaunch.h b/include/grub/slaunch.h
+index c44ca7996..b5982972d 100644
+--- a/include/grub/slaunch.h
++++ b/include/grub/slaunch.h
+@@ -130,11 +130,22 @@ void grub_slaunch_fb_capture (void);
+ void grub_slaunch_fb_start (void);
+ void grub_slaunch_fb_add_slrt (struct grub_slr_table *slrt);
+ void grub_slaunch_fb_fill_slrt (struct grub_slaunch_params *slparams);
++/* Debug-only launch log in RAM, see loader/slaunch/log.c */
++void grub_slaunch_log_start (void);
++void grub_slaunch_log_add_slrt (struct grub_slr_table *slrt);
++void grub_slaunch_log_flush (void);
++void grub_slaunch_log_init (void);
++void grub_slaunch_log_fini (void);
+ #else
+ static inline void grub_slaunch_fb_capture (void) { }
+ static inline void grub_slaunch_fb_start (void) { }
+ static inline void grub_slaunch_fb_add_slrt (struct grub_slr_table *slrt __attribute__ ((unused))) { }
+ static inline void grub_slaunch_fb_fill_slrt (struct grub_slaunch_params *slparams __attribute__ ((unused))) { }
++static inline void grub_slaunch_log_start (void) { }
++static inline void grub_slaunch_log_add_slrt (struct grub_slr_table *slrt __attribute__ ((unused))) { }
++static inline void grub_slaunch_log_flush (void) { }
++static inline void grub_slaunch_log_init (void) { }
++static inline void grub_slaunch_log_fini (void) { }
+ #endif
+ 
+ /* Linux i386 functions */
+diff --git a/include/grub/slr_table.h b/include/grub/slr_table.h
+index e04614f0d..9ed86dc59 100644
+--- a/include/grub/slr_table.h
++++ b/include/grub/slr_table.h
+@@ -64,6 +64,7 @@
+ #define GRUB_SLR_ENTRY_UEFI_CONFIG	0x0008
+ /* Debug only, not in the SLRT specification. */
+ #define GRUB_SLR_ENTRY_DEBUG_FB		0x8000
++#define GRUB_SLR_ENTRY_DEBUG_LOG	0x8001
+ #define GRUB_SLR_ENTRY_END		0xffff
+ 
+ /* Entity Types */
+@@ -254,6 +255,29 @@ struct grub_slr_entry_debug_fb
+   grub_uint32_t reserved;
+ } GRUB_PACKED;
+ 
++/*
++ * Debug only: a ring buffer in RAM, a struct grub_slaunch_log followed by its
++ * data, that keeps the launch output across a reset.
++ */
++struct grub_slr_entry_debug_log
++{
++  struct grub_slr_entry_hdr hdr;
++  grub_uint64_t base;
++  grub_uint64_t size;		/* Including the struct grub_slaunch_log. */
++} GRUB_PACKED;
++
++#define GRUB_SLAUNCH_LOG_MAGIC	0x474f4c4742444c53ULL	/* "SLDBGLOG" */
++
++struct grub_slaunch_log
++{
++  grub_uint64_t magic;
++  grub_uint32_t size;		/* Of data[]. */
++  grub_uint32_t head;		/* Next byte written. */
++  grub_uint32_t wrapped;	/* data[] filled at least once. */
++  grub_uint32_t reserved;
++  char data[];
++} GRUB_PACKED;
++
+ static inline void *
+ grub_slr_end_of_entries (struct grub_slr_table *table)
+ {
+-- 
+2.43.0
+

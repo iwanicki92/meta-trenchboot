@@ -1,0 +1,44 @@
+From ec8df46dc9cfd0fe1e9225b096eae496a64d150d Mon Sep 17 00:00:00 2001
+From: iwanicki92 <iwanicki92@gmail.com>
+Date: Tue, 27 Oct 2026 19:30:03 +0100
+Subject: [PATCH] x86/smpboot: fix the GDT limit in the TXT MLE JOIN structure
+
+wake_aps_in_txt() fills the MLE JOIN structure's GDT limit with
+trampoline_gdt[1], the GDT base. trampoline_gdt is a uint32_t array
+whose first entry holds the GDTR pseudo-descriptor:
+
+    GLOBAL(trampoline_gdt)
+            .word   0
+    gdt_48:
+            .word   .Ltrampoline_gdt_end - trampoline_gdt - 1
+            .long   bootsym_rel(trampoline_gdt, 4)
+
+so the limit is bits 31:16 of trampoline_gdt[0]. A limit above 0xffff
+is invalid, the APs never join and Xen goes on with one CPU:
+
+    (XEN) Failed to bring up CPU 1 (error -5)
+
+Backport of TrenchBoot/xen tb-staging 71804b7053 ("x86/smpboot: fix the
+GDT limit in the TXT MLE JOIN structure"). The rest of that series
+(GETSEC[WAKEUP] and waking the APs before VMXON) does not apply to this
+branch and is needed only where SINIT lacks the MONITOR wake.
+
+Signed-off-by: iwanicki92 <iwanicki92@gmail.com>
+Upstream-Status: Backport [https://github.com/TrenchBoot/xen/commit/71804b7053654ea964963c945e08e0208cf3de5e]
+---
+ xen/arch/x86/smpboot.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/xen/arch/x86/smpboot.c b/xen/arch/x86/smpboot.c
+index 79642856d3..a83266610b 100644
+--- a/xen/arch/x86/smpboot.c
++++ b/xen/arch/x86/smpboot.c
+@@ -446,7 +446,7 @@ static int wake_aps_in_txt(unsigned long trampoline_rm)
+ #define trampoline_relative(x) \
+     (trampoline_rm + ((char *)(x) - trampoline_realmode_entry))
+ 
+-    join[0] = trampoline_gdt[1];                    /* GDT limit */
++    join[0] = (trampoline_gdt[0] >> 16) & 0xffff;   /* GDT limit */
+     join[1] = trampoline_relative(trampoline_gdt);  /* GDT base */
+     join[2] = TXT_AP_BOOT_CS;                       /* CS selector, DS = CS+8 */
+     join[3] = trampoline_relative(txt_ap_entry);    /* EIP */

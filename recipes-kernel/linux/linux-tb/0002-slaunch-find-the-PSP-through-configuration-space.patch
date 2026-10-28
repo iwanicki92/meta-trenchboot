@@ -1,0 +1,108 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: iwanicki92 <iwanicki92@gmail.com>
+Date: Mon, 21 Sep 2026 20:44:13 +0200
+Subject: [PATCH] slaunch: find the PSP through configuration space
+
+slaunch_setup_skinit() runs from setup_arch() and looked for the PSP
+with for_each_pci_dev(), which walks a list the PCI core only fills
+during the initcalls. The walk found nothing, SL_FLAG_SKINIT_PSP stayed
+clear, amd_iommu_enable() never released the TMR the bootloader set up,
+and DMA to the boot disk stayed blocked.
+
+Walk configuration space directly instead, the way early_quirks() does
+from the same function and the PSP driver already does for the mailbox
+base, and log the find.
+
+Upstream-Status: Pending
+Signed-off-by: iwanicki92 <iwanicki92@gmail.com>
+---
+ arch/x86/kernel/slaunch.c | 52 +++++++++++++++++++++++++++++++-------
+ 1 file changed, 43 insertions(+), 9 deletions(-)
+
+diff --git a/arch/x86/kernel/slaunch.c b/arch/x86/kernel/slaunch.c
+index 157a494..514a906 100644
+--- a/arch/x86/kernel/slaunch.c
++++ b/arch/x86/kernel/slaunch.c
+@@ -18,6 +18,7 @@
+ #include <asm/sections.h>
+ #include <asm/tlbflush.h>
+ #include <asm/e820/api.h>
++#include <asm/pci-direct.h>
+ #include <asm/svm.h>
+ #include <asm/setup.h>
+ #include <asm/realmode.h>
+@@ -608,6 +609,45 @@ static void slaunch_skinit_prepare(void)
+ 	early_memunmap(slrt, amd_info_temp.slrt_size);
+ }
+ 
++/*
++ * Look for an AMD Secure Processor with a DRTM mailbox, the list the
++ * bootloader and SKL match against. This runs from setup_arch(), before
++ * the PCI core has enumerated anything, so walk configuration space
++ * directly the way early_quirks() does.
++ */
++static bool __init slaunch_skinit_find_psp(void)
++{
++	const struct pci_device_id *psp_dev;
++	unsigned int bus, slot, func;
++	u32 id;
++
++	if (!early_pci_allowed())
++		return false;
++
++	for (bus = 0; bus < 256; bus++) {
++		for (slot = 0; slot < 32; slot++) {
++			for (func = 0; func < 8; func++) {
++				id = read_pci_config(bus, slot, func, PCI_VENDOR_ID);
++				if ((u16)id == 0xffff) {
++					/* No function 0 means an empty slot */
++					if (func == 0)
++						break;
++					continue;
++				}
++
++				for (psp_dev = psp_devs_list; psp_dev->vendor; psp_dev++) {
++					if (psp_dev->vendor == (id & 0xffff) &&
++					    psp_dev->device == (id >> 16) &&
++					    psp_dev->driver_data != PSP_NONE)
++						return true;
++				}
++			}
++		}
++	}
++
++	return false;
++}
++
+ /*
+  * AMD SKINIT specific late stub setup and validation called from within
+  * x86 specific setup_arch().
+@@ -615,8 +655,6 @@ static void slaunch_skinit_prepare(void)
+ static void __init slaunch_setup_skinit(void)
+ {
+ 	u64 val;
+-	struct pci_dev *dev;
+-	struct pci_device_id *psp_dev;
+ 
+ 	/*
+ 	 * If the platform is performing a Secure Launch via SKINIT
+@@ -631,13 +669,9 @@ static void __init slaunch_setup_skinit(void)
+ 	/* Set flags on BSP so subsequent code knows it was a SKINIT launch */
+ 	sl_flags |= (SL_FLAG_ACTIVE | SL_FLAG_ARCH_SKINIT);
+ 
+-	dev = NULL;
+-	for_each_pci_dev(dev) {
+-		psp_dev = pci_match_id(psp_devs_list, dev);
+-		if (psp_dev && psp_dev->driver_data != PSP_NONE) {
+-			sl_flags |= SL_FLAG_SKINIT_PSP;
+-			break;
+-		}
++	if (slaunch_skinit_find_psp()) {
++		sl_flags |= SL_FLAG_SKINIT_PSP;
++		pr_info("AMD PSP DRTM mailbox found\n");
+ 	}
+ 
+ 	pr_info("AMD SKINIT setup complete\n");
+-- 
+2.43.0
+
