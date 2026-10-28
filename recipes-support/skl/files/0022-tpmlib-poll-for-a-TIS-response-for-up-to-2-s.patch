@@ -1,0 +1,55 @@
+From aa2593bb7121f422c9edb0d8c492748227b46ea6 Mon Sep 17 00:00:00 2001
+From: iwanicki92 <iwanicki92@gmail.com>
+Date: Wed, 28 Oct 2026 19:29:22 +0100
+Subject: [PATCH] tpmlib: poll for a TIS response for up to 2 s
+
+tis_recv() waited TIMEOUT_D once after STS_GO and gave up if the
+response was not there, 30 ms on TPM 2.0. TIMEOUT_D bounds a register
+access, not a command, which may run for the long duration, 2 s. A
+TPM2_GetCapability answered late made the SKL take the TPM for SHA-1 and
+SHA-256 and Linux reset on the extend of the log that followed. Poll
+dataAvail every millisecond for up to 2 s instead.
+
+Upstream-Status: Pending
+Signed-off-by: iwanicki92 <iwanicki92@gmail.com>
+---
+ tpmlib/tis.c | 18 +++++++++---------
+ 1 file changed, 9 insertions(+), 9 deletions(-)
+
+diff --git a/tpmlib/tis.c b/tpmlib/tis.c
+index fb5bcf6..44cb065 100644
+--- a/tpmlib/tis.c
++++ b/tpmlib/tis.c
+@@ -168,20 +168,20 @@ size_t tis_recv(enum tpm_family f, struct tpmbuff *buf)
+ 	u32 expected;
+ 	u8 *buf_ptr;
+ 	struct tpm_header *hdr;
++	int i;
+ 
+ 	if (locality > TPM_MAX_LOCALITY)
+ 		return 0;
+ 
+-	/* ensure that there is data available */
+-	if (!tis_data_available(locality)) {
+-		if (f == TPM12)
+-			tpm1_timeout_d();
+-		else
+-			tpm2_timeout_d();
++	/*
++	 * Poll for the response. TIMEOUT_D bounds a register access, not a
++	 * command, which may run for TPM2's long duration, 2 s.
++	 */
++	for (i = 0; !tis_data_available(locality) && i < 2000; i++)
++		tpm_mdelay(1);
+ 
+-		if (!tis_data_available(locality))
+-			return 0;
+-	}
++	if (!tis_data_available(locality))
++		return 0;
+ 
+ 	/* read header */
+ 	hdr = (struct tpm_header *)buf->head;
+-- 
+2.43.0
+

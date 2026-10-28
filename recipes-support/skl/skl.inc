@@ -33,6 +33,7 @@ SRC_URI = " \
     file://0019-Print-to-the-framebuffer-GRUB-describes-in-the-SLRT.patch \
     file://0020-Append-the-output-to-a-RAM-log-GRUB-describes-in-the.patch \
     file://0021-amdsl-check-PCR-17-after-SKINIT-instead-of-guessing-.patch \
+    file://0022-tpmlib-poll-for-a-TIS-response-for-up-to-2-s.patch \
 "
 
 BRANCH = "skl-loader-amdsl-noblob"

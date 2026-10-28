@@ -1,4 +1,4 @@
-From ef1271af635791c8c0bf0878b89cae8bdab2198d Mon Sep 17 00:00:00 2001
+From e3af02daf126a604c89fa729575d021f29560f9b Mon Sep 17 00:00:00 2001
 From: iwanicki92 <iwanicki92@gmail.com>
 Date: Mon, 21 Sep 2026 23:29:24 +0200
 Subject: [PATCH] Log the TPM's banks and append the PSP's TCG log
@@ -11,7 +11,10 @@ banks in that order. Each record carries SHA-1 and SHA-256 where the TPM
 has them and the TCG placeholder digest, one then zeros, elsewhere,
 which is extended into that bank as well so the log replays there. A
 TPM that does not answer, one behind a locked locality among them, is
-taken for the SHA-1 and SHA-256 one a discrete TPM ships as.
+taken for the SHA-1 and SHA-256 one a discrete TPM ships as, and the
+query's return code is printed. The message is short: the classic build
+sits close to the page boundary past which bootloader_data's 16-bit
+offset overflows.
 
 Under the PSP DRTM service the extends of PCR 17 and 18 between SKINIT
 and the DLME are the service's, kept in a log of its own, so the log the
@@ -25,7 +28,7 @@ at the locality the service unlocks with it.
 Upstream-Status: Pending
 Signed-off-by: iwanicki92 <iwanicki92@gmail.com>
 ---
- event_log.c             | 339 +++++++++++++++++++++------
+ event_log.c             | 347 +++++++++++++++++++++------
  include/event_log.h     |   9 +
  include/psp.h           |   5 +
  main.c                  |  30 ++-
@@ -36,11 +39,11 @@ Signed-off-by: iwanicki92 <iwanicki92@gmail.com>
  tpmlib/tpm2.h           |   8 +
  tpmlib/tpm2_cmds.c      | 109 +++++++++
  tpmlib/tpm2_constants.h |   4 +
- 11 files changed, 1010 insertions(+), 79 deletions(-)
+ 11 files changed, 1018 insertions(+), 79 deletions(-)
  create mode 100644 test-event_log.c
 
 diff --git a/event_log.c b/event_log.c
-index 483697c..ac38d72 100644
+index 483697c..44f8c7b 100644
 --- a/event_log.c
 +++ b/event_log.c
 @@ -17,11 +17,13 @@
@@ -214,7 +217,7 @@ index 483697c..ac38d72 100644
  };
  
  int log_event_tpm12(u32 pcr, u8 sha1[SHA1_DIGEST_SIZE], char *event)
-@@ -187,30 +208,186 @@ int log_event_tpm12(u32 pcr, u8 sha1[SHA1_DIGEST_SIZE], char *event)
+@@ -187,30 +208,194 @@ int log_event_tpm12(u32 pcr, u8 sha1[SHA1_DIGEST_SIZE], char *event)
      return 1;
  }
  
@@ -384,9 +387,11 @@ index 483697c..ac38d72 100644
 +{
 +    u16 algs[MAX_BANKS];
 +    u32 n = MAX_BANKS, i;
++    int rc;
 +
 +    nbanks = 0;
-+    if ( tpm_get_pcr_banks(tpm, algs, &n) == 0 )
++    rc = tpm_get_pcr_banks(tpm, algs, &n);
++    if ( rc == 0 )
 +    {
 +        for ( i = 0; i < n; i++ )
 +        {
@@ -396,6 +401,12 @@ index 483697c..ac38d72 100644
 +            banks[nbanks].size = digest_size(algs[i]);
 +            nbanks++;
 +        }
++    }
++    else
++    {
++        print("Bank query failed: ");
++        print_u64((u32)rc);
++        print("\n");
 +    }
 +
 +    if ( nbanks == 0 )
@@ -417,7 +428,7 @@ index 483697c..ac38d72 100644
  }
  
  int event_log_init(struct tpm *tpm)
-@@ -233,8 +410,9 @@ int event_log_init(struct tpm *tpm)
+@@ -233,8 +418,9 @@ int event_log_init(struct tpm *tpm)
      }
      else if ( tpm->family == TPM20 )
      {
@@ -429,7 +440,7 @@ index 483697c..ac38d72 100644
      }
      else
      {
-@@ -277,7 +455,7 @@ int event_log_init(struct tpm *tpm)
+@@ -277,7 +463,7 @@ int event_log_init(struct tpm *tpm)
          if ( tpm->family == TPM12 )
              ev.event_size = sizeof(tpm12_id_struct);
          else
@@ -438,7 +449,7 @@ index 483697c..ac38d72 100644
  
          log_write(&ev, sizeof(ev));
      }
-@@ -288,10 +466,19 @@ int event_log_init(struct tpm *tpm)
+@@ -288,10 +474,19 @@ int event_log_init(struct tpm *tpm)
          log_write(&tpm12_id_struct, sizeof(tpm12_id_struct));
          id->hdr.container_size = info->size;
      } else {
