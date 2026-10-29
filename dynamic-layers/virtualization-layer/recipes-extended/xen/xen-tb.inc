@@ -4,9 +4,9 @@ PV = "${XEN_REL}+tb"
 
 SRC_URI = "git://github.com/TrenchBoot/xen.git;branch=${XEN_BRANCH};protocol=https"
 
-SRCREV = "e1fffe38308c5b1d33e213797d5d5b0239286abc"
+SRCREV = "8bea73c4615ba46de97e1b7d46a4f5e0a137f29d"
 
 S = "${WORKDIR}/git"
 
 XEN_REL = "4.23"
-XEN_BRANCH = "tb-staging-2026-07-23"
+XEN_BRANCH = "tb-staging"
