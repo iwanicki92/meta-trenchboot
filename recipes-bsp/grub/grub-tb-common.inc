@@ -1,12 +1,12 @@
 PV = "2.12"
 
 SRC_URI = " \
-           git://github.com/TrenchBoot/grub.git;name=grub;branch=${BRANCH_grub};protocol=https \
+           git://github.com/iwanicki92/grub.git;name=grub;branch=${BRANCH_grub};protocol=https \
            git://github.com/coreutils/gnulib;name=gnulib;branch=${BRANCH_gnulib};protocol=https;destsuffix=git/gnulib \
           "
 
-BRANCH_grub = "tb-dev"
-SRCREV_grub = "b5517787efc2359908c268e7bad5eb0bd1043525"
+BRANCH_grub = "up/all"
+SRCREV_grub = "bdf2109a9bf52baf041c7b0bbd812805bb414215"
 
 # We add gnulib to SRC_URI to avoid downloading it during the do_configure().
 # The bootstrap script seems to be smart enough to skip fetching repo again
